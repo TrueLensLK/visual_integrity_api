@@ -11,14 +11,14 @@ def quick_check(file_path):
     Analyzes file structure before deep processing.
     Returns: {'status': 'PASS'/'FAIL', 'reason': ...}
     """
-    print(f"🔍 Layer 1 Analyzing: {file_path}...")
+    print(f"Layer 1 Analyzing: {file_path}...")
     
     try:
-        # A. Check if it is a valid image format
+        # Check if it is a valid image format
         with Image.open(file_path) as img:
             img.verify()  # PIL built-in integrity check
         
-        # B. Check Resolution Constraints
+        # Check Resolution Constraints
         # Re-open required because .verify() closes the file
         with Image.open(file_path) as img:
             width, height = img.size
@@ -28,9 +28,9 @@ def quick_check(file_path):
             if width < 100 or height < 100:
                 return {"status": "FAIL", "reason": "Image too small (likely an icon)"}
 
-            # Reject "Pixel Bombs" (Massive images meant to crash your server)
+            # Reject massive images 
             if width > 6000 or height > 6000:
-                return {"status": "FAIL", "reason": "Image resolution too high (DOS Protection)"}
+                return {"status": "FAIL", "reason": "Image resolution too high"}
 
         return {"status": "PASS", "details": "File structure is valid."}
 
@@ -42,7 +42,7 @@ def quick_check(file_path):
 # ==========================================
 if __name__ == "__main__":
     # Create a dummy file to test
-    print("🧪 Running Local Test...")
+    print("Running Local Test...")
     with open("test.txt", "w") as f: f.write("Not an image")
     
     # Test the function

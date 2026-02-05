@@ -8,11 +8,11 @@ import os
 # ==========================================
 # CONFIGURATION
 # ==========================================
-# 1. Point to YOUR specific file
+# Point to YOUR specific file
 MODEL_FILE = "efficientnet_b0.pth" 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), MODEL_FILE)
 
-# 2. Global variable to hold the loaded model
+# Global variable to hold the loaded model
 model = None
 
 def load_custom_model():
@@ -20,13 +20,13 @@ def load_custom_model():
     if model is not None: return model
 
     if not os.path.exists(MODEL_PATH):
-        print(f"⚠️ [Layer 4] Missing file: {MODEL_PATH}")
+        print(f"[Layer 4] Missing file: {MODEL_PATH}")
         return None
 
     try:
-        print(f"⏳ [Layer 4] Loading your custom model: {MODEL_FILE}...")
+        print(f"[Layer 4] Loading your custom model: {MODEL_FILE}...")
         
-        # A. Create the empty brain structure (EfficientNet-B0)
+        # Create the empty brain structure (EfficientNet-B0)
         # We must tell it how many classes you trained it on.
         # usually 2 (Fake vs Real) or 1 (Binary). Let's assume 2 for now.
         model = EfficientNet.from_name('efficientnet-b0', num_classes=2)
@@ -36,11 +36,11 @@ def load_custom_model():
         model.load_state_dict(state_dict)
         
         model.eval() # Set to "Test Mode"
-        print("✅ [Layer 4] Custom Model Loaded Successfully.")
+        print("[Layer 4] Custom Model Loaded Successfully.")
         return model
 
     except Exception as e:
-        print(f"❌ [Layer 4 Error] Could not load .pth file: {e}")
+        print(f"[Layer 4 Error] Could not load .pth file: {e}")
         return None
 
 def predict_visuals(file_path):

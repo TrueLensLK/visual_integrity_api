@@ -13,10 +13,10 @@ def analyze_physics(file_path):
     Returns: Impact Score (+15 Real, -20 Fake)
     """
     impact = 0
-    print(f"🔬 Layer 3 Analyzing Physics: {file_path}...")
+    print(f"Layer 3 Analyzing Physics: {file_path}...")
     
     try:
-        # --- TEST 1: ELA (Error Level Analysis) ---
+        # ELA (Error Level Analysis)
         # AI edits often break the JPEG compression grid.
         original = Image.open(file_path).convert('RGB')
         
@@ -41,7 +41,7 @@ def analyze_physics(file_path):
         else:
             impact += 10 # Consistent structure
 
-        # --- TEST 2: Noise Variance (The "Smoothness" Trap) ---
+        # Noise Variance (The "Smoothness" Trap) 
         # AI models (Diffusion) struggle to generate chaotic sensor noise.
         img_cv = cv2.imread(file_path, 0) # Load Grayscale
         
@@ -65,4 +65,4 @@ def analyze_physics(file_path):
 # LOCAL TESTER
 # ==========================================
 if __name__ == "__main__":
-    print("⚠️ To test Layer 3, place a .jpg file here and run this script.")
+    print("To test Layer 3, place a .jpg file here and run this script.")

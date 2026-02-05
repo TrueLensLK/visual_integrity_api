@@ -17,13 +17,13 @@ def calculate_integrity(meta_score, physics_score, visual_score, face_score, spe
     # This is the strongest rule. If the eyes reflect different worlds, it is physically impossible.
     # No amount of metadata or visual quality can save it.
     if eye_score <= -40:
-        print("   [Judge] 🚨 Physics Violation detected (Mismatched Eyes).")
+        print("   [Judge] Physics Violation detected (Mismatched Eyes).")
         return -50, "FAKE", "Optical physics violation: Eyes reflect different light sources."
 
     # --- RULE 2: THE RESOLUTION TRAP ---
     # If Metadata found AI dimensions (e.g., 1024x1024), we cap the score.
     if meta_score < 0:
-        print("   [Judge] 🚨 AI Resolution detected. Capping score.")
+        print("   [Judge] AI Resolution detected. Capping score.")
         return 35, "SUSPICIOUS", "Image dimensions match AI generation defaults."
 
     # --- RULE 3: The "Uncanny Veto" ---
@@ -57,7 +57,7 @@ def calculate_integrity(meta_score, physics_score, visual_score, face_score, spe
         if visual_score >= 20 and eye_score >= 0:
              # Boost the score slightly because the eyes and brain agree
             final_score += 10 
-            print("   [Judge] 🌐 Web Image Detected (No Meta + Good Physics). Boosting score.")
+            print("   [Judge] Web Image Detected (No Meta + Good Physics). Boosting score.")
         else:
             # If Visuals are weak AND no metadata, cap it.
             final_score = min(final_score, 65)
