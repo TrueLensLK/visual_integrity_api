@@ -44,6 +44,8 @@ temp_uploads/
 *.h5
 *.pkl
 *.onnx
+truelens_backend/
+truelens_ai_service/
 
 # Logs
 *.log
