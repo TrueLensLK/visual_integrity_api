@@ -1,0 +1,12 @@
+fastapi
+uvicorn[standard]
+python-multipart
+torch
+torchvision
+numpy
+opencv-python
+opencv-contrib-python
+pillow
+exifread
+mediapipe==0.10.14
+protobuf<5,>=4.25.3
