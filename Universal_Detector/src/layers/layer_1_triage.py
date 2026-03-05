@@ -1,52 +1,116 @@
-from PIL import Image
 import os
+import io
+import json
+from PIL import Image, ImageSequence, ImageCms
+from pathlib import Path
 
-# ==========================================
-# LAYER 1: QUICK FORENSIC TRIAGE
-# Purpose: Reject broken files, tiny icons, or "pixel bombs"
-# ==========================================
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+except ImportError:
+    print("[Warning] pillow-heif not installed. HEIC/AVIF support will be limited.")
 
-def quick_check(file_path):
+# CONFIGURATION
+TRIAGE_CONFIG = {
+    "MIN_RES": 128,          
+    "MAX_RES": 10000,        
+    "MAX_FRAMES": 1,         
+    "ALLOWED_FORMATS": {'JPEG', 'PNG', 'WEBP', 'TIFF', 'HEIC', 'AVIF', 'BMP'},
+    "REQUIRE_ICC": False,
+    "COMPRESSION_BPP_THRESHOLD": 2.0  # NEW: Bits-per-pixel threshold to flag heavy compression
+}
+
+MODE_DEPTH_MAP = {
+    '1': 1, 'L': 8, 'P': 8, 'RGB': 8, 'RGBA': 8, 'CMYK': 8, 
+    'I;16': 16, 'I;16L': 16, 'I;16B': 16, 'F': 32
+}
+
+def quick_check(file_path: str, config: dict = TRIAGE_CONFIG) -> dict:
     """
-    Analyzes file structure before deep processing.
-    Returns: {'status': 'PASS'/'FAIL', 'reason': ...}
+    Performs structural forensics to triage files before deep analysis.
+    Adds Compression Triage to flag "Web Trash" for downstream math layers.
     """
-    print(f"Layer 1 Analyzing: {file_path}...")
-    
+    path = Path(file_path)
+    if not path.exists():
+        return {"status": "FAIL", "reason": "File not found"}
+
     try:
-        # Check if it is a valid image format
+        # Get file size for compression math
+        file_size_bytes = os.path.getsize(file_path)
+
         with Image.open(file_path) as img:
-            img.verify()  # PIL built-in integrity check
-        
-        # Check Resolution Constraints
-        # Re-open required because .verify() closes the file
-        with Image.open(file_path) as img:
-            width, height = img.size
-            file_format = img.format
+            # 1. FORMAT & INTEGRITY
+            fmt = img.format
+            if fmt not in config["ALLOWED_FORMATS"]:
+                return {"status": "FAIL", "reason": f"Unsupported format: {fmt}"}
             
-            # Reject Tiny Images (Icons/Thumbnails)
-            if width < 100 or height < 100:
-                return {"status": "FAIL", "reason": "Image too small (likely an icon)"}
+            # 2. ANIMATION DETECTION
+            is_animated = getattr(img, "is_animated", False)
+            n_frames = getattr(img, "n_frames", 1)
+            if is_animated or n_frames > config["MAX_FRAMES"]:
+                return {"status": "FAIL", "reason": f"Animation detected ({n_frames} frames)"}
 
-            # Reject massive images 
-            if width > 6000 or height > 6000:
-                return {"status": "FAIL", "reason": "Image resolution too high"}
+            # 3. RESOLUTION & ASPECT
+            w, h = img.size
+            if w < config["MIN_RES"] or h < config["MIN_RES"]:
+                return {"status": "FAIL", "reason": f"Resolution too low ({w}x{h})"}
+            if w > config["MAX_RES"] or h > config["MAX_RES"]:
+                return {"status": "FAIL", "reason": f"Resolution exceeds max ({w}x{h})"}
+            
+            # 4. COLOR PROFILE VALIDATION
+            icc = img.info.get("icc_profile")
+            profile_name = "None"
+            if icc:
+                try:
+                    profile = ImageCms.getProfileDescription(io.BytesIO(icc)).strip()
+                    profile_name = profile if profile else "Unknown"
+                except:
+                    profile_name = "Corrupt/Custom"
+            elif config["REQUIRE_ICC"]:
+                return {"status": "FAIL", "reason": "Missing color profile (ICC)"}
 
-        return {"status": "PASS", "details": "File structure is valid."}
+            # 5. BIT DEPTH ANALYSIS
+            bit_depth = MODE_DEPTH_MAP.get(img.mode, "Unknown")
+
+            # ---------------------------------------------------------
+            # NEW: 6. COMPRESSION & DEGRADATION TRIAGE ("THE SIGNAL MUTE")
+            # ---------------------------------------------------------
+            is_degraded = False
+            degradation_reasons = []
+
+            # Calculate Bits Per Pixel (BPP). Low BPP = Heavy web compression.
+            bpp = (file_size_bytes * 8) / (w * h)
+            
+            if bpp < config["COMPRESSION_BPP_THRESHOLD"]:
+                is_degraded = True
+                degradation_reasons.append(f"Low Bits-Per-Pixel ({bpp:.2f}) indicates heavy compression.")
+
+            # Check for stripped EXIF data (common in social media/Google downloads)
+            has_exif = 'exif' in img.info
+            if not has_exif and fmt in ['JPEG', 'WEBP']:
+                is_degraded = True
+                degradation_reasons.append("Missing EXIF metadata (Likely web-scrubbed).")
+
+            # Check for native WebP usage (Almost always lossy web format)
+            if fmt == 'WEBP':
+                is_degraded = True
+                degradation_reasons.append("WebP format (Inherent loss of high-frequency data).")
+            # ---------------------------------------------------------
+
+            return {
+                "status": "PASS",
+                "is_degraded_signal": is_degraded,      # L5 CEA WILL READ THIS
+                "degradation_reasons": degradation_reasons, # LLM JUDGE WILL READ THIS
+                "details": {
+                    "format": fmt,
+                    "resolution": f"{w}x{h}",
+                    "file_size_bytes": file_size_bytes,
+                    "bits_per_pixel": round(bpp, 2),
+                    "bit_depth": bit_depth,
+                    "color_profile": profile_name,
+                    "has_exif": has_exif
+                }
+            }
 
     except Exception as e:
-        return {"status": "FAIL", "reason": f"Corrupted or non-image file: {str(e)}"}
-
-# ==========================================
-# LOCAL TESTER (Only runs if you run this file directly)
-# ==========================================
-if __name__ == "__main__":
-    # Create a dummy file to test
-    print("Running Local Test...")
-    with open("test.txt", "w") as f: f.write("Not an image")
-    
-    # Test the function
-    print(quick_check("test.txt"))  # Should FAIL
-    
-    # Clean up
-    if os.path.exists("test.txt"): os.remove("test.txt")
+        return {"status": "FAIL", "reason": f"Forensic Triage Error: {str(e)}"}

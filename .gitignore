@@ -44,8 +44,22 @@ temp_uploads/
 *.h5
 *.pkl
 *.onnx
+*.safetensors
+*.bin
+*.msgpack
 truelens_backend/
 truelens_ai_service/
+
+# Validation & Reports
+VALIDATION_REPORT_*.md
+
+# Datasets (optional - uncomment if you want to ignore)
+validation_dataset/
+# test_images/
+# test_results/
+
+# Large 3rd party dependencies
+vcpkg/
 
 # Logs
 *.log
