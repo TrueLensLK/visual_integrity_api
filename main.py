@@ -26,6 +26,7 @@ FINAL BOSS (LLM + Adversarial Debate):
       judged by Convergence Detector (Groq text), max 3 rounds
 """
 
+import io
 import os
 import sys
 import shutil
@@ -43,6 +44,7 @@ load_dotenv()  # Load .env file for API keys
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl, field_validator
+import httpx
 import requests
 
 # --- PATH CONFIGURATION ---
@@ -480,8 +482,40 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and "uvicorn" not in sys.argv[0]:
         main()
 
+# ===========================================================================
+# /extract-phash bootstrap  –  must be defined before FastAPI app creation
+# ===========================================================================
+from contextlib import asynccontextmanager
+
+from Universal_Detector.src.layers.phash_extractor import (
+    extract_phash as _run_extract_phash,
+    PhashResult,
+    PHASH_DOWNLOAD_TIMEOUT as _PHASH_DOWNLOAD_TIMEOUT,
+    PHASH_MAX_BYTES as _PHASH_MAX_BYTES,
+)
+
+# Module-level HTTP client singleton.
+# Re-using a single AsyncClient across requests avoids per-request TCP
+# handshake and TLS negotiation overhead — critical for a fast-path endpoint.
+_http_client: httpx.AsyncClient | None = None
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    """Open / close the shared httpx client around the app lifetime."""
+    global _http_client
+    _http_client = httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=_PHASH_DOWNLOAD_TIMEOUT,
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+    )
+    yield
+    await _http_client.aclose()
+    _http_client = None
+
+
 # --- FastAPI App ---
-app = FastAPI(title="AI Image Detection v6.0")
+app = FastAPI(title="AI Image Detection v6.0", lifespan=_lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 api_detector = AIImageDetector(enable_llm_judge=os.getenv("ENABLE_LLM_JUDGE", "true").lower() == "true")
@@ -602,3 +636,134 @@ async def api_analyze_url(body: AnalyzeUrlRequest):
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+
+
+# ===========================================================================
+# /extract-phash  –  High-throughput perceptual hash endpoint
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
+class ExtractPhashRequest(BaseModel):
+    """Payload for the /extract-phash endpoint."""
+
+    s3_url: str  # Pre-signed or public S3 URL (http/https)
+
+    @field_validator("s3_url")
+    @classmethod
+    def _validate_url_scheme(cls, v: str) -> str:
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("s3_url must use http or https scheme.")
+        if not parsed.netloc:
+            raise ValueError("s3_url must be a fully qualified URL.")
+        return v
+
+
+class ExtractPhashResponse(BaseModel):
+    """Hashes for the original and the horizontally mirrored image."""
+
+    original_hash: str    # Binary string, e.g. "10110010…"
+    mirrored_hash: str    # Binary string of the FLIP_LEFT_RIGHT variant
+    hash_algorithm: str   # "pdq" | "phash"
+    hash_bits: int        # Length of each binary string
+    border_stripped: bool # Whether a uniform border was detected and removed
+
+
+# ---------------------------------------------------------------------------
+# Endpoint
+# ---------------------------------------------------------------------------
+@app.post("/extract-phash", response_model=ExtractPhashResponse)
+async def extract_phash(body: ExtractPhashRequest) -> ExtractPhashResponse:
+    """
+    Download an image from *s3_url* (entirely in memory – no disk I/O),
+    apply forensic pre-processing mitigations, and return two PDQ/pHash
+    binary strings:
+
+    * **original_hash** – hash of the border-stripped image.
+    * **mirrored_hash** – hash of the horizontally flipped variant.
+
+    The two hashes allow upstream services to detect mirror-attack evasion
+    by checking ``hamming(query, mirrored_hash)`` alongside the normal
+    ``hamming(query, original_hash)``.
+
+    All hashing logic lives in
+    ``Universal_Detector/src/layers/phash_extractor.py``.
+    """
+    # ------------------------------------------------------------------
+    # 1. Async stream download into memory (no disk I/O)
+    #    Re-uses the module-level singleton client to avoid per-request
+    #    TCP / TLS setup overhead.
+    # ------------------------------------------------------------------
+    buf = io.BytesIO()
+    downloaded = 0
+
+    assert _http_client is not None, "HTTP client not initialised (startup event missed)"
+
+    try:
+        async with _http_client.stream("GET", body.s3_url) as response:
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to download image: HTTP {response.status_code}.",
+                )
+
+            content_type = (
+                response.headers.get("content-type", "")
+                .split(";")[0]
+                .strip()
+                .lower()
+            )
+            if content_type and not content_type.startswith("image/"):
+                raise HTTPException(
+                    status_code=415,
+                    detail=f"URL does not point to a supported image. "
+                           f"Content-Type received: '{content_type}'.",
+                )
+
+            async for chunk in response.aiter_bytes(chunk_size=65536):
+                downloaded += len(chunk)
+                if downloaded > _PHASH_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Image exceeds the "
+                               f"{_PHASH_MAX_BYTES // (1024 * 1024)} MB limit.",
+                    )
+                buf.write(chunk)
+
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Request timed out after {_PHASH_DOWNLOAD_TIMEOUT}s.",
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"Network error: {exc}")
+
+    if downloaded == 0:
+        raise HTTPException(status_code=400, detail="Downloaded file is empty.")
+
+    # ------------------------------------------------------------------
+    # 2. Delegate all processing to the phash_extractor module.
+    #    buf.getbuffer() returns a zero-copy memoryview — no second full
+    #    allocation of the image data.
+    # ------------------------------------------------------------------
+    try:
+        result: PhashResult = _run_extract_phash(buf.getbuffer())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    return ExtractPhashResponse(
+        original_hash=result.original_hash,
+        mirrored_hash=result.mirrored_hash,
+        hash_algorithm=result.hash_algorithm,
+        hash_bits=result.hash_bits,
+        border_stripped=result.border_stripped,
+    )
+

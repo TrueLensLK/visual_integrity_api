@@ -1,0 +1,53 @@
+# ---------------------------------------------------------------------------
+# .dockerignore — excludes files from the Docker build context.
+#
+# Docker streams the entire build context to the daemon before processing
+# the Dockerfile.  Excluding large / irrelevant paths:
+#   1. Speeds up context transfer (critical when the venv is hundreds of MB)
+#   2. Prevents cache-busting: __pycache__ mtimes change constantly, which
+#      would invalidate the COPY . . layer on every rebuild even when no
+#      real source file changed.
+#   3. Prevents secrets (e.g. .env) from accidentally leaking into the image.
+# ---------------------------------------------------------------------------
+
+# Python bytecode — regenerated at runtime; never belongs in an image
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment — all deps are installed from requirements.txt
+venv/
+.venv/
+env/
+
+# Temporary runtime artefacts — created and deleted at request time
+temp_uploads/
+
+# Development / test artefacts
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+
+# Environment secrets — must never be baked into an image layer
+.env
+*.env
+
+# Version control metadata — not needed inside the container
+.git/
+.gitignore
+
+# IDE configuration
+.idea/
+.vscode/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Documentation — reduces context size; not needed at runtime
+*.md
