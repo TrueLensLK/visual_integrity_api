@@ -1,0 +1,38 @@
+# Core Web Framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+python-dotenv>=1.0.0
+
+# Deep Learning
+torch>=2.1.0
+torchvision>=0.16.0
+timm>=0.9.0
+transformers>=4.36.0
+
+# Computer Vision
+opencv-python>=4.9.0
+opencv-contrib-python>=4.9.0
+pillow>=10.2.0
+mediapipe==0.10.14
+
+# Scientific Computing
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Forensics
+c2pa-python>=0.4.0
+exifread>=3.0.0
+
+# LLM Providers
+google-generativeai>=0.3.0
+groq>=0.4.0
+openai>=1.0.0
+
+# Utilities
+tqdm>=4.66.0
+requests>=2.31.0
+tabulate>=0.9.0
+pydantic>=2.5.0
+langgraph>=0.0.1
+protobuf>=4.25.3,<5
