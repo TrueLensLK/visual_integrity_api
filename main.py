@@ -35,12 +35,15 @@ import numpy as np
 from typing import Dict, Tuple, Optional, Any
 from dataclasses import dataclass, asdict
 from datetime import datetime
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file for API keys
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, HttpUrl, field_validator
+import requests
 
 # --- PATH CONFIGURATION ---
 # Add layers directory to Python path
@@ -501,3 +504,102 @@ async def api_analyze(file: UploadFile = File(...)):
 
 @app.get("/health")
 def health(): return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Request model for the URL-based analysis endpoint
+# ---------------------------------------------------------------------------
+_ALLOWED_IMAGE_CONTENT_TYPES = {
+    "image/jpeg", "image/png", "image/webp", "image/gif",
+    "image/bmp", "image/tiff", "image/x-tiff",
+}
+_MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB hard limit
+_DOWNLOAD_TIMEOUT_SECONDS = 15
+
+
+class AnalyzeUrlRequest(BaseModel):
+    url: HttpUrl
+
+    @field_validator("url")
+    @classmethod
+    def must_be_http_or_https(cls, v: HttpUrl) -> HttpUrl:
+        if v.scheme not in ("http", "https"):
+            raise ValueError("Only http/https URLs are supported.")
+        return v
+
+
+@app.post("/analyze-url")
+async def api_analyze_url(body: AnalyzeUrlRequest):
+    """
+    Download an image from the provided URL and run the same multi-layer
+    forensic analysis as the /analyze endpoint.
+
+    - Validates that the URL is http/https.
+    - Streams the response to check Content-Type and enforce a size limit
+      before writing to disk (avoids downloading huge/non-image payloads).
+    - Cleans up the temporary file regardless of success or failure.
+    """
+    url_str = str(body.url)
+
+    # Derive a safe file extension from the URL path (fallback to .jpg)
+    url_path = urlparse(url_str).path
+    _, ext = os.path.splitext(url_path)
+    ext = ext.lower() if ext.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff") else ".jpg"
+
+    temp_path = os.path.join("temp_uploads", f"{uuid.uuid4().hex}{ext}")
+    os.makedirs("temp_uploads", exist_ok=True)
+
+    try:
+        # Stream the download so we can validate headers before buffering the body
+        with requests.get(url_str, stream=True, timeout=_DOWNLOAD_TIMEOUT_SECONDS,
+                          allow_redirects=True) as response:
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to download image: HTTP {response.status_code} from remote server."
+                )
+
+            # Validate Content-Type header
+            content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            if content_type not in _ALLOWED_IMAGE_CONTENT_TYPES:
+                raise HTTPException(
+                    status_code=415,
+                    detail=f"Remote URL does not point to a supported image. "
+                           f"Content-Type received: '{content_type}'."
+                )
+
+            # Stream to disk while enforcing the size limit
+            downloaded = 0
+            with open(temp_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=65536):
+                    downloaded += len(chunk)
+                    if downloaded > _MAX_IMAGE_SIZE_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Remote image exceeds the maximum allowed size of "
+                                   f"{_MAX_IMAGE_SIZE_BYTES // (1024 * 1024)} MB."
+                        )
+                    f.write(chunk)
+
+        if downloaded == 0:
+            raise HTTPException(status_code=400, detail="Downloaded file is empty.")
+
+        result = api_detector.analyze_image(temp_path)
+        return _sanitize(asdict(result))
+
+    except HTTPException:
+        raise  # Re-raise FastAPI HTTP exceptions as-is
+    except requests.exceptions.Timeout:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Request timed out while downloading image from the provided URL "
+                   f"(limit: {_DOWNLOAD_TIMEOUT_SECONDS}s)."
+        )
+    except requests.exceptions.ConnectionError as e:
+        raise HTTPException(status_code=502, detail=f"Could not connect to remote server: {e}")
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=400, detail=f"Error downloading image: {e}")
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
