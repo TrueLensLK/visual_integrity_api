@@ -510,8 +510,7 @@ def health(): return {"status": "ok"}
 # Request model for the URL-based analysis endpoint
 # ---------------------------------------------------------------------------
 _ALLOWED_IMAGE_CONTENT_TYPES = {
-    "image/jpeg", "image/png", "image/webp", "image/gif",
-    "image/bmp", "image/tiff", "image/x-tiff",
+    "image/jpeg", "image/png",
 }
 _MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB hard limit
 _DOWNLOAD_TIMEOUT_SECONDS = 15
