@@ -61,7 +61,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 BORDER_TOLERANCE: int = 15          # pixel std-dev threshold for border detection
 PHASH_MAX_BYTES: int = 20 * 1024 * 1024   # 20 MB
-PHASH_DOWNLOAD_TIMEOUT: int = 10    # seconds
+PHASH_DOWNLOAD_TIMEOUT: float = 30.0      # seconds (increased for reliability)
 
 
 # ---------------------------------------------------------------------------

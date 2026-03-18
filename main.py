@@ -490,7 +490,6 @@ from contextlib import asynccontextmanager
 from Universal_Detector.src.layers.phash_extractor import (
     extract_phash as _run_extract_phash,
     PhashResult,
-    PHASH_DOWNLOAD_TIMEOUT as _PHASH_DOWNLOAD_TIMEOUT,
     PHASH_MAX_BYTES as _PHASH_MAX_BYTES,
 )
 
@@ -504,10 +503,34 @@ _http_client: httpx.AsyncClient | None = None
 async def _lifespan(application: FastAPI):
     """Open / close the shared httpx client around the app lifetime."""
     global _http_client
+
+    # Configure timeouts explicitly for different phases:
+    # - connect: time to establish TCP connection (including DNS)
+    # - read: time to receive data chunks
+    # - write: time to send request
+    # - pool: time to acquire a connection from pool
+    timeout_config = httpx.Timeout(
+        connect=10.0,    # 10s for DNS + TCP handshake
+        read=30.0,       # 30s for reading response (large images)
+        write=10.0,      # 10s for sending request
+        pool=5.0,        # 5s to acquire connection from pool
+    )
+
+    # Connection limits tuned for high-throughput:
+    # - max_connections: total concurrent connections
+    # - max_keepalive_connections: kept warm for reuse
+    # - keepalive_expiry: how long to keep idle connections
+    limits_config = httpx.Limits(
+        max_connections=200,
+        max_keepalive_connections=50,
+        keepalive_expiry=30.0,
+    )
+
     _http_client = httpx.AsyncClient(
         follow_redirects=True,
-        timeout=_PHASH_DOWNLOAD_TIMEOUT,
-        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+        timeout=timeout_config,
+        limits=limits_config,
+        http2=True,  # Enable HTTP/2 for better multiplexing
     )
     yield
     await _http_client.aclose()
@@ -677,87 +700,208 @@ class ExtractPhashResponse(BaseModel):
 # Endpoint
 # ---------------------------------------------------------------------------
 @app.post("/extract-phash", response_model=ExtractPhashResponse)
-async def extract_phash(body: ExtractPhashRequest) -> ExtractPhashResponse:
+async def extract_phash_endpoint(body: ExtractPhashRequest) -> ExtractPhashResponse:
     """
-    Download an image from *s3_url* (entirely in memory – no disk I/O),
-    apply forensic pre-processing mitigations, and return two PDQ/pHash
-    binary strings:
+    High-throughput perceptual hash extraction endpoint.
 
-    * **original_hash** – hash of the border-stripped image.
-    * **mirrored_hash** – hash of the horizontally flipped variant.
+    Downloads an image from *s3_url* entirely in memory (no disk I/O),
+    applies forensic pre-processing mitigations (border stripping, mirror defense),
+    and returns PDQ/pHash hex strings.
 
-    The two hashes allow upstream services to detect mirror-attack evasion
-    by checking ``hamming(query, mirrored_hash)`` alongside the normal
-    ``hamming(query, original_hash)``.
+    Optimizations:
+    - Connection pooling with HTTP/2 multiplexing
+    - Streaming download with size limits
+    - CPU-bound hashing offloaded to thread pool
+    - Comprehensive error handling with retry hints
 
-    All hashing logic lives in
-    ``Universal_Detector/src/layers/phash_extractor.py``.
+    Returns:
+        - **original_hash** – hash of the border-stripped image (hex)
+        - **mirrored_hash** – hash of the horizontally flipped variant (hex)
     """
+    import asyncio
+    import logging
+
+    logger = logging.getLogger("extract-phash")
+
+    # Validate client is ready
+    if _http_client is None:
+        logger.error("HTTP client not initialized - lifespan event may have failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Service temporarily unavailable: HTTP client not initialized. Please retry.",
+        )
+
+    url_str = str(body.s3_url)
+
     # ------------------------------------------------------------------
     # 1. Async stream download into memory (no disk I/O)
-    #    Re-uses the module-level singleton client to avoid per-request
-    #    TCP / TLS setup overhead.
     # ------------------------------------------------------------------
     buf = io.BytesIO()
     downloaded = 0
 
-    assert _http_client is not None, "HTTP client not initialised (startup event missed)"
+    # Retry configuration for transient failures
+    max_retries = 2
+    retry_delay = 0.5  # seconds
+    last_error: Exception | None = None
 
-    try:
-        async with _http_client.stream("GET", body.s3_url) as response:
-            if response.status_code != 200:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Failed to download image: HTTP {response.status_code}.",
-                )
+    for attempt in range(max_retries + 1):
+        try:
+            buf.seek(0)
+            buf.truncate(0)
+            downloaded = 0
 
-            content_type = (
-                response.headers.get("content-type", "")
-                .split(";")[0]
-                .strip()
-                .lower()
-            )
-            if content_type and not content_type.startswith("image/"):
-                raise HTTPException(
-                    status_code=415,
-                    detail=f"URL does not point to a supported image. "
-                           f"Content-Type received: '{content_type}'.",
-                )
-
-            async for chunk in response.aiter_bytes(chunk_size=65536):
-                downloaded += len(chunk)
-                if downloaded > _PHASH_MAX_BYTES:
+            async with _http_client.stream("GET", url_str) as response:
+                # Check HTTP status
+                if response.status_code == 404:
                     raise HTTPException(
-                        status_code=413,
-                        detail=f"Image exceeds the "
-                               f"{_PHASH_MAX_BYTES // (1024 * 1024)} MB limit.",
+                        status_code=404,
+                        detail="Image not found at the provided URL.",
                     )
-                buf.write(chunk)
+                if response.status_code == 403:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Access denied. The signed URL may have expired.",
+                    )
+                if response.status_code >= 500:
+                    # Server error - worth retrying
+                    raise httpx.HTTPStatusError(
+                        f"Upstream server error: {response.status_code}",
+                        request=response.request,
+                        response=response,
+                    )
+                if response.status_code != 200:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to download image: HTTP {response.status_code}.",
+                    )
 
-    except HTTPException:
-        raise
-    except httpx.TimeoutException:
+                # Validate content type (but be lenient - S3 sometimes returns generic types)
+                content_type = (
+                    response.headers.get("content-type", "")
+                    .split(";")[0]
+                    .strip()
+                    .lower()
+                )
+                # Allow: image/*, application/octet-stream, or empty (S3 pre-signed URLs)
+                if content_type and not (
+                    content_type.startswith("image/") or
+                    content_type == "application/octet-stream" or
+                    content_type == "binary/octet-stream"
+                ):
+                    raise HTTPException(
+                        status_code=415,
+                        detail=f"URL does not point to a supported image. "
+                               f"Content-Type received: '{content_type}'.",
+                    )
+
+                # Stream chunks with size limit
+                async for chunk in response.aiter_bytes(chunk_size=65536):
+                    downloaded += len(chunk)
+                    if downloaded > _PHASH_MAX_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Image exceeds the "
+                                   f"{_PHASH_MAX_BYTES // (1024 * 1024)} MB limit.",
+                        )
+                    buf.write(chunk)
+
+            # Success - break out of retry loop
+            last_error = None
+            break
+
+        except HTTPException:
+            # Don't retry client errors (4xx)
+            raise
+        except httpx.TimeoutException as exc:
+            last_error = exc
+            logger.warning(f"Timeout on attempt {attempt + 1}/{max_retries + 1}: {exc}")
+            if attempt < max_retries:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+        except httpx.ConnectError as exc:
+            # DNS resolution failures, connection refused, etc.
+            last_error = exc
+            error_msg = str(exc)
+            logger.warning(f"Connection error on attempt {attempt + 1}/{max_retries + 1}: {error_msg}")
+
+            # Check for DNS-specific errors
+            if "name resolution" in error_msg.lower() or "getaddrinfo" in error_msg.lower():
+                if attempt < max_retries:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    continue
+                raise HTTPException(
+                    status_code=502,
+                    detail="DNS resolution failed. The service may be experiencing network issues. Please retry.",
+                )
+
+            if attempt < max_retries:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            logger.warning(f"HTTP error on attempt {attempt + 1}/{max_retries + 1}: {exc}")
+            if attempt < max_retries:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+        except httpx.RequestError as exc:
+            last_error = exc
+            logger.warning(f"Request error on attempt {attempt + 1}/{max_retries + 1}: {exc}")
+            if attempt < max_retries:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+
+    # If we exhausted retries, raise the last error
+    if last_error is not None:
+        if isinstance(last_error, httpx.TimeoutException):
+            raise HTTPException(
+                status_code=504,
+                detail="Request timed out after multiple attempts. The image server may be slow or unreachable.",
+            )
         raise HTTPException(
-            status_code=504,
-            detail=f"Request timed out after {_PHASH_DOWNLOAD_TIMEOUT}s.",
+            status_code=502,
+            detail=f"Network error after {max_retries + 1} attempts: {last_error}",
         )
-    except httpx.RequestError as exc:
-        raise HTTPException(status_code=502, detail=f"Network error: {exc}")
 
     if downloaded == 0:
         raise HTTPException(status_code=400, detail="Downloaded file is empty.")
 
     # ------------------------------------------------------------------
-    # 2. Delegate all processing to the phash_extractor module.
-    #    buf.getbuffer() returns a zero-copy memoryview — no second full
-    #    allocation of the image data.
+    # 2. Run CPU-bound hash extraction in thread pool
+    #    This prevents blocking the async event loop during image
+    #    decoding and hash computation.
     # ------------------------------------------------------------------
     try:
-        result: PhashResult = _run_extract_phash(buf.getbuffer())
+        # Get the buffer as bytes (memoryview doesn't work across threads)
+        image_bytes = buf.getvalue()
+
+        # Run in thread pool to avoid blocking the event loop
+        loop = asyncio.get_running_loop()
+        result: PhashResult = await loop.run_in_executor(
+            None,  # Use default thread pool
+            _run_extract_phash,
+            image_bytes,
+        )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        logger.warning(f"Image processing failed: {exc}")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unable to process image: {exc}",
+        )
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+        logger.error(f"Hash library error: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Hash computation unavailable: {exc}",
+        )
+    except Exception as exc:
+        logger.exception(f"Unexpected error during hash extraction: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error during image processing. Please retry.",
+        )
+    finally:
+        # Explicitly clear the buffer to free memory
+        buf.close()
 
     return ExtractPhashResponse(
         original_hash=result.original_hash,
