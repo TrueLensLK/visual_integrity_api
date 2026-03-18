@@ -5,8 +5,10 @@ python-multipart>=0.0.9
 python-dotenv>=1.0.0
 
 # Deep Learning
-torch>=2.1.0
-torchvision>=0.16.0
+# NOTE: torch and torchvision are installed separately in Dockerfile
+# using PyTorch's CPU-only index for smaller download size (~200MB vs ~915MB)
+# torch>=2.1.0
+# torchvision>=0.16.0
 timm>=0.9.0
 transformers>=4.36.0
 

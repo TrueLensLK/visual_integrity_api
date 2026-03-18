@@ -100,12 +100,14 @@ COPY requirements.txt .
 # the layer is invalidated, previously downloaded wheels don't need re-downloading.
 # This is critical when building from Git URL contexts where layer caching is weak.
 #
-# Phase 1: Install PyTorch separately (largest packages ~1GB+, most likely to timeout)
+# Phase 1: Install PyTorch CPU-only build from PyTorch's official index.
+#          CPU build is ~200MB vs ~915MB for CUDA, making downloads much more reliable.
+#          For GPU support, change to: --index-url https://download.pytorch.org/whl/cu121
 # Phase 2: Install remaining dependencies
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --timeout 600 \
-        "torch>=2.1.0" \
-        "torchvision>=0.16.0" \
+        --index-url https://download.pytorch.org/whl/cpu \
+        torch torchvision \
     && pip install --timeout 300 -r requirements.txt
 
 # ---------------------------------------------------------------------------
