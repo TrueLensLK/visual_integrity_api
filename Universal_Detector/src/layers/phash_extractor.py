@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from typing import Union
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 # ---------------------------------------------------------------------------
 # Optional hash libraries (graceful degradation)
@@ -220,6 +220,7 @@ def extract_phash(image_bytes: Union[bytes, memoryview, bytearray]) -> PhashResu
     try:
         buf = io.BytesIO(image_bytes)
         pil_image = Image.open(buf)
+        pil_image = ImageOps.exif_transpose(pil_image)
         pil_image.load()  # force full decode while buf is still live
     except Exception as exc:
         raise ValueError(f"Cannot decode image: {exc}") from exc
