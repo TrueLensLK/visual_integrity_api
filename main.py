@@ -551,9 +551,9 @@ _DOWNLOAD_TIMEOUT_SECONDS = 15
 
 
 class AnalyzeUrlRequest(BaseModel):
-    url: HttpUrl
+    s3_url: HttpUrl  # Changed from 'url' to 's3_url' for consistency with /extract-phash
 
-    @field_validator("url")
+    @field_validator("s3_url")
     @classmethod
     def must_be_http_or_https(cls, v: HttpUrl) -> HttpUrl:
         if v.scheme not in ("http", "https"):
@@ -572,7 +572,7 @@ async def api_analyze_url(body: AnalyzeUrlRequest):
       before writing to disk (avoids downloading huge/non-image payloads).
     - Cleans up the temporary file regardless of success or failure.
     """
-    url_str = str(body.url)
+    url_str = str(body.s3_url)  # Changed from body.url to body.s3_url
 
     # Derive a safe file extension from the URL path (fallback to .jpg)
     url_path = urlparse(url_str).path
