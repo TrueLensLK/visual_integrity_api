@@ -93,19 +93,35 @@ class DefenseAgent:
 
             for model in self._model_chain:
                 try:
-                    response = self._openrouter_client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        temperature=0.7,
-                        max_tokens=1024,
-                        response_format={"type": "json_object"},
-                         extra_headers={
-                            "HTTP-Referer": "http://localhost:8000",
-                            "X-Title": "DeepFake_Detector_Defense"
-                        }
-                    )
-                    if response.choices:
-                        return response.choices[0].message.content
+                    try:
+                        # Attempt with JSON mode first
+                        response = self._openrouter_client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            temperature=0.7,
+                            max_tokens=1024,
+                            response_format={"type": "json_object"},
+                            extra_headers={
+                                "HTTP-Referer": "http://localhost:8000",
+                                "X-Title": "DeepFake_Detector_Defense"
+                            }
+                        )
+                    except Exception as json_err:
+                        if "400" in str(json_err):
+                            # Retry without JSON mode if model doesn't support it
+                            response = self._openrouter_client.chat.completions.create(
+                                model=model,
+                                messages=messages,
+                                temperature=0.7,
+                                max_tokens=1024,
+                                extra_headers={
+                                    "HTTP-Referer": "http://localhost:8000",
+                                    "X-Title": "DeepFake_Detector_Defense"
+                                }
+                            )
+                        else:
+                            raise json_err
+
                 except Exception:
                     continue
         

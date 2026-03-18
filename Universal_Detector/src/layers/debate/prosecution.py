@@ -152,16 +152,32 @@ class ProsecutionAgent:
         for model in models:
             try:
                 # print(f"[Debate/Prosecution] Trying OpenRouter model: {model}")
-                response = self._openrouter_client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=0.1,
-                    max_tokens=2048,
-                    response_format={"type": "json_object"},
-                    extra_headers={"HTTP-Referer": "https://deepfake-detection.local"}
-                )
+                try:
+                    # Attempt with JSON mode first
+                    response = self._openrouter_client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=0.1,
+                        max_tokens=2048,
+                        response_format={"type": "json_object"},
+                        extra_headers={"HTTP-Referer": "https://deepfake-detection.local"}
+                    )
+                except Exception as json_err:
+                    if "400" in str(json_err):
+                        # Retry without JSON mode if model doesn't support it
+                        response = self._openrouter_client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            temperature=0.1,
+                            max_tokens=2048,
+                            extra_headers={"HTTP-Referer": "https://deepfake-detection.local"}
+                        )
+                    else:
+                        raise json_err
+
                 if response.choices:
                     return response.choices[0].message.content
+
             except Exception as e:
                 err_msg = str(e).lower()
                 if "404" in err_msg or "not found" in err_msg:

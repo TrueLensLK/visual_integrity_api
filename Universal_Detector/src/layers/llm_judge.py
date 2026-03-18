@@ -586,13 +586,30 @@ class HybridJudge:
                 "compressed", "model consensus", "false positive",
                 "downgrad", "dismissed"
             ])
-            if rb_has_correction:
+            
+            # AMENDMENT 1: Allow override if LLM is extremely confident (>90%)
+            # This implies the LLM sees something visually obvious that the rules missed.
+            is_super_confident = llm_result.confidence > 0.90
+            
+            # AMENDMENT 2: Allow override if LLM explicitly challenges the suppression
+            # If the LLM mentions "suppressed" or "dampened", it likely reviewed the
+            # specific contradiction warning we generated and decided the suppression was wrong.
+            challenges_suppression = any(kw in llm_result.reasoning.lower() for kw in [
+                "suppressed", "dampened", "ignored", "overlooked", "invalid dismissal"
+            ])
+
+            if rb_has_correction and not (is_super_confident or challenges_suppression):
                 print(f"[HybridJudge] LLM OVERRIDE BLOCKED")
                 print(f"    LLM: {final_verdict} @ {llm_result.confidence:.0%}")
                 print(f"    Rule-based: {rule_based_verdict} ({rule_based_score}/100)")
                 print(f"    Reason: Rule-based identified false positive; LLM used dismissed evidence")
                 print(f"    → Keeping rule-based verdict")
                 return rule_based_verdict, rule_based_score, rule_based_description, None
+            
+            if rb_has_correction and (is_super_confident or challenges_suppression):
+                print(f"[HybridJudge] LLM OVERRIDE ALLOWED (High Confidence/Challenge)")
+                print(f"    LLM: {final_verdict} @ {llm_result.confidence:.0%} (Confident: {is_super_confident})")
+                print(f"    Reason: LLM explicitly challenged the rule-based dismissal.")
 
         # Calculate Final Score based on LLM Confidence
         final_description = f"[LLM] {llm_result.reasoning}"

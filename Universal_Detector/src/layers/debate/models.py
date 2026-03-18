@@ -16,14 +16,21 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════════════════
 
 OPENROUTER_VISION_MODELS = [
-    # High Performance (Free/Low Cost)
+    # High Performance (Free/Low Cost) - Updated for stability
     "google/gemini-2.0-flash-lite-preview-02-05:free",
+    "google/gemini-2.0-pro-exp-02-05:free",
+    "google/gemini-2.0-flash-thinking-exp:free",
     "qwen/qwen-2.5-vl-72b-instruct:free",
-    "meta-llama/llama-3.2-90b-vision-instruct:free",
     
-    # Mid-Range Fallbacks
+    # Meta
+    "meta-llama/llama-3.2-90b-vision-instruct:free",
+    "meta-llama/llama-3.2-11b-vision-instruct:free",
+    
+    # Mistral
     "mistralai/pixtral-12b:free",
-    "google/gemini-2.0-pro-exp-02-05:free"
+    
+    # Fallback to paid but cheap if free fails (user might have credit)
+    "google/gemini-2.0-flash-001"
 ]
 
 # ═══════════════════════════════════════════════════════════════════════
