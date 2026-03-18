@@ -18,11 +18,17 @@ FROM python:3.12-slim
 #                                build; skip it to save ~50 MB per install.
 #   PIP_DISABLE_PIP_VERSION_CHECK=1 – suppresses the "new pip available"
 #                                     noise that pollutes build logs.
+#   PIP_DEFAULT_TIMEOUT=300    – increase socket timeout to 5 minutes to
+#                                handle slow PyPI downloads (default is 15s).
+#   PIP_RETRIES=5              – retry failed downloads up to 5 times to
+#                                handle transient network issues.
 # ---------------------------------------------------------------------------
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=5
 
 # ---------------------------------------------------------------------------
 # System dependencies — all installed and cache-purged in ONE RUN layer.
@@ -81,10 +87,20 @@ WORKDIR /app
 # is unchanged, the `pip install` layer is reused on every rebuild, even when
 # application source files change.  This is the single most impactful caching
 # technique for Python images — it saves minutes per CI build.
+#
+# NOTE: Large packages (torch, transformers) can timeout on slow networks.
+# The PIP_DEFAULT_TIMEOUT=300 and PIP_RETRIES=5 env vars handle this, but
+# we also add explicit --timeout flag for extra safety.
 # ---------------------------------------------------------------------------
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies in two phases for better reliability:
+# Phase 1: Install PyTorch separately (largest package, most likely to timeout)
+# Phase 2: Install remaining dependencies
+RUN pip install --no-cache-dir --timeout 600 \
+        "torch>=2.1.0" \
+        "torchvision>=0.16.0" \
+    && pip install --no-cache-dir --timeout 300 -r requirements.txt
 
 # ---------------------------------------------------------------------------
 # Application source
