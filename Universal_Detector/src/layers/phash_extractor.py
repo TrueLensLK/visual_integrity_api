@@ -71,10 +71,10 @@ PHASH_DOWNLOAD_TIMEOUT: int = 10    # seconds
 class PhashResult:
     """Immutable result returned by :func:`extract_phash`."""
 
-    original_hash: str    # Binary string  e.g. "10110010…"
-    mirrored_hash: str    # Binary string of the FLIP_LEFT_RIGHT variant
+    original_hash: str    # Hex string  e.g. "a3f2b1c9..."
+    mirrored_hash: str    # Hex string of the FLIP_LEFT_RIGHT variant
     hash_algorithm: str   # "pdq" | "phash"
-    hash_bits: int        # Length of each binary string (256 for PDQ, 64 for phash)
+    hash_bits: int        # Bit length of the hash (256 for PDQ, 64 for phash)
     border_stripped: bool # True when a uniform border was detected and removed
 
 
@@ -140,17 +140,19 @@ def _strip_uniform_borders(img_array: np.ndarray, tolerance: int = BORDER_TOLERA
     return img_array[top : bottom + 1, left : right + 1]
 
 
-def _hash_to_binary_string(pil_image: Image.Image) -> str:
+def _hash_to_hex_string(pil_image: Image.Image) -> tuple[str, int]:
     """
-    Compute a perceptual hash and return it as a ``'0'``/``'1'`` binary string.
+    Compute a perceptual hash and return it as a hexadecimal string.
 
-    The binary-string format lets upstream Node.js / SQL services execute
-    native bitwise XOR + POPCOUNT Hamming distance queries without any
-    additional encoding.
+    The hex format is compact and widely supported for storage and
+    Hamming distance queries (convert to bytes, XOR, popcount).
 
     Priority:
       1. ``pdqhash`` (Facebook PDQ, 256-bit) – most robust against rescaling.
       2. ``imagehash.phash`` (DCT-based, 64-bit) – widely available fallback.
+
+    Returns:
+        Tuple of (hex_string, bit_length).
 
     Raises:
         RuntimeError: When neither hash library is installed.
@@ -158,12 +160,17 @@ def _hash_to_binary_string(pil_image: Image.Image) -> str:
     if _PDQ_AVAILABLE:
         arr = np.array(pil_image.convert("RGB"), dtype=np.uint8)
         hash_vector, _quality = _pdqhash_lib.compute(arr)
-        return "".join(str(int(b)) for b in hash_vector)
+        # Convert bool array to bytes then to hex
+        # hash_vector is 256 bits = 32 bytes
+        bits = np.packbits(hash_vector.astype(np.uint8))
+        hex_str = bits.tobytes().hex()
+        return hex_str, 256
 
     if _IMAGEHASH_AVAILABLE:
         h = _imagehash_lib.phash(pil_image)
-        bits = np.array(h.hash).flatten()  # numpy bool array
-        return "".join("1" if b else "0" for b in bits)
+        # imagehash has a built-in hex conversion via str()
+        hex_str = str(h)
+        return hex_str, 64
 
     raise RuntimeError(
         "No perceptual-hash library is available. "
@@ -193,13 +200,13 @@ def extract_phash(image_bytes: Union[bytes, memoryview, bytearray]) -> PhashResu
        (vectorised NumPy — no Python loops).
     3. **Mitigation 2** – Generate a horizontally mirrored copy with
        ``Image.FLIP_LEFT_RIGHT``.
-    4. Hash both variants with PDQ (or phash fallback) → binary strings.
+    4. Hash both variants with PDQ (or phash fallback) → hex strings.
 
     Args:
         image_bytes: Raw image bytes (JPEG, PNG, WebP, …).
 
     Returns:
-        :class:`PhashResult` containing both hashes as binary strings plus
+        :class:`PhashResult` containing both hashes as hex strings plus
         metadata about which algorithm was used and whether a border was found.
 
     Raises:
@@ -228,9 +235,9 @@ def extract_phash(image_bytes: Union[bytes, memoryview, bytearray]) -> PhashResu
     # 3. Mirror variant
     mirrored_image: Image.Image = content_image.transpose(_FLIP_LEFT_RIGHT)
 
-    # 4. Hash generation
-    original_hash = _hash_to_binary_string(content_image)
-    mirrored_hash = _hash_to_binary_string(mirrored_image)
+    # 4. Hash generation (returns hex string and bit length)
+    original_hash, hash_bits = _hash_to_hex_string(content_image)
+    mirrored_hash, _ = _hash_to_hex_string(mirrored_image)
 
     algorithm = "pdq" if _PDQ_AVAILABLE else "phash"
 
@@ -238,6 +245,6 @@ def extract_phash(image_bytes: Union[bytes, memoryview, bytearray]) -> PhashResu
         original_hash=original_hash,
         mirrored_hash=mirrored_hash,
         hash_algorithm=algorithm,
-        hash_bits=len(original_hash),
+        hash_bits=hash_bits,
         border_stripped=border_stripped,
     )
