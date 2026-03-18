@@ -23,6 +23,7 @@ def analyze_context(image_path_or_url: str) -> Tuple[float, Dict]:
         "match_count": 0,
         "trusted_sources": [],
         "is_viral_new": False,
+        "scene_type": "",  # e.g., "outdoor", "natural", "indoor", "studio"
         "note": "Context lookup disabled (no API configured)"
     }
     

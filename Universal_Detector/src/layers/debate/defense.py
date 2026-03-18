@@ -9,6 +9,7 @@ from typing import Optional, List
 from .models import (
     AgentResponse,
     DEFENSE_PROMPT,
+    OPENROUTER_VISION_MODELS,  # New import
     parse_agent_json,
     format_debate_history,
     encode_image_base64,
@@ -18,62 +19,118 @@ from .models import (
 
 class DefenseAgent:
     """
-    Argues REAL. Uses OpenRouter (different architecture from Gemini prosecution).
+    Argues REAL. Uses OpenRouter (Primary) or Gemini/Groq (Fallback).
 
     Round 1: Vision call (sees the actual image + case file)
     Rounds 2-3: Text-only rebuttals (argues from forensic evidence only)
     """
 
-    def __init__(self, api_key: str, model: str = "nvidia/nemotron-nano-12b-v2-vl:free"):
-        self._client = None
-        self._api_key = api_key
-        self._model_name = model
+    def __init__(self, openrouter_api_key: str = "", gemini_api_key: str = "", groq_api_key: str = ""):
+        self._openrouter_key = openrouter_api_key
+        self._gemini_key = gemini_api_key
+        self._groq_key = groq_api_key
+        
+        self._openrouter_client = None
+        self._gemini_model = None
+        self._groq_client = None
+        
+        # Use user-provided model or default fallback chain
+        self._model_chain = OPENROUTER_VISION_MODELS
 
-    def _init(self):
-        if self._client or not self._api_key:
+    def _init_openrouter(self):
+        if self._openrouter_client or not self._openrouter_key:
             return
         try:
             from openai import OpenAI
-            self._client = OpenAI(
-                api_key=self._api_key,
+            self._openrouter_client = OpenAI(
+                api_key=self._openrouter_key.strip(),
                 base_url="https://openrouter.ai/api/v1"
             )
         except Exception as e:
             print(f"[Debate/Defense] OpenRouter init failed: {e}")
 
-    def _call(self, user_prompt: str, image_path: Optional[str] = None) -> Optional[str]:
-        """Make an OpenRouter API call, optionally with an image."""
-        self._init()
-        if not self._client:
-            return None
-
-        messages = [{"role": "system", "content": DEFENSE_PROMPT}]
-        user_content = []
-
-        if image_path:
-            img_b64 = encode_image_base64(image_path)
-            mime = get_mime_type(image_path)
-            if img_b64:
-                user_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{img_b64}"}
-                })
-
-        user_content.append({"type": "text", "text": user_prompt})
-        messages.append({"role": "user", "content": user_content})
-
+    def _init_gemini(self):
+        if self._gemini_model or not self._gemini_key:
+            return
         try:
-            response = self._client.chat.completions.create(
-                model=self._model_name,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=2048,
-                extra_headers={"HTTP-Referer": "https://deepfake-detection.local"}
-            )
-            return response.choices[0].message.content
+            import google.generativeai as genai
+            genai.configure(api_key=self._gemini_key)
+            self._gemini_model = genai.GenerativeModel("gemini-2.0-flash")
         except Exception as e:
-            print(f"[Debate/Defense] API call failed: {e}")
+            print(f"[Debate/Defense] Gemini init failed: {e}")
+
+    def call(self, case_file: str, image_path: Optional[str] = None, opponent_points: Optional[List[str]] = None) -> Optional[AgentResponse]:
+        """Generate defense argument."""
+        user_prompt = f"CASE FILE:\n{case_file}\n"
+        if opponent_points:
+            user_prompt += f"\nOPPONENT ARGUMENTS:\n{json.dumps(opponent_points)}"
+            
+        # Call the private method that handles the fallback chain
+        raw_response = self._call(user_prompt, image_path)
+        if not raw_response:
             return None
+
+        return parse_agent_json(raw_response, default_verdict="REAL")
+
+    def _call(self, user_prompt: str, image_path: Optional[str] = None) -> Optional[str]:
+        """Make an API call with fallback chain (OpenRouter -> Gemini -> Groq)."""
+        
+        # 1. Try OpenRouter (Primary)
+        self._init_openrouter()
+        if self._openrouter_client:
+            messages = [{"role": "system", "content": DEFENSE_PROMPT}]
+            user_content = []
+            if image_path:
+                b64 = encode_image_base64(image_path)
+                mime = get_mime_type(image_path)
+                if b64:
+                    user_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{b64}"}
+                    })
+            user_content.append({"type": "text", "text": user_prompt})
+            messages.append({"role": "user", "content": user_content})
+
+            for model in self._model_chain:
+                try:
+                    response = self._openrouter_client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=0.7,
+                        max_tokens=1024,
+                        response_format={"type": "json_object"},
+                         extra_headers={
+                            "HTTP-Referer": "http://localhost:8000",
+                            "X-Title": "DeepFake_Detector_Defense"
+                        }
+                    )
+                    if response.choices:
+                        return response.choices[0].message.content
+                except Exception:
+                    continue
+        
+        # 2. Try Gemini (Fallback for Vision/Text)
+        self._init_gemini()
+        if self._gemini_model:
+            try:
+                full_prompt = f"{DEFENSE_PROMPT}\n\n{user_prompt}"
+                if image_path:
+                    import PIL.Image
+                    with PIL.Image.open(image_path) as img:
+                        response = self._gemini_model.generate_content([full_prompt, img])
+                else:
+                    response = self._gemini_model.generate_content(full_prompt)
+                return response.text
+            except Exception as e:
+                print(f"[Debate/Defense] Gemini fallback failed: {e}")
+
+        # 3. Try Groq (Text-only fallback) - implies skipping image analysis if round 1
+        if not image_path and self._groq_key: 
+             # Implement Groq fallback here if needed, but Gemini/OpenRouter cover mostly everything
+             pass
+
+        print(f"[Debate/Defense] All models failed.")
+        return None
 
     def opening_statement(self, image_path: str, case_string: str) -> AgentResponse:
         """Round 1: Vision call — sees the actual image + case file."""

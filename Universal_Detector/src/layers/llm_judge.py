@@ -33,56 +33,51 @@ class LLMVerdict:
 
 # --- THE "HIERARCHY OF TRUTH" SYSTEM PROMPT ---
 SYSTEM_PROMPT = """You are the 'Chief Forensic Arbitrator' for a DeepFake detection system.
-You will receive:
-1. A structured 'Case File' containing categorized forensic telemetry (Physics, Pixels, Visuals).
-2. THE ACTUAL IMAGE being analyzed (you can SEE it).
+You have access to:
+1. THE ACTUAL IMAGE (Visual Evidence) - LOOK AT THIS FIRST.
+2. A 'Case File' (Forensic Telemetry) - Use this to support your visual findings.
 
-YOUR MISSION: Deliver a final verdict by strictly adhering to the HIERARCHY OF EVIDENCE below.
+YOUR CORE TASK: Distinguish Valid Forensic Signals from False Positives (Compression/Editing).
 
-=== THE HIERARCHY OF EVIDENCE (CRITICAL) ===
-You must respect this order of operations. Higher rules OVERRIDE lower rules.
+=== VISUAL INSPECTION PROTOCOL (Step 1) ===
+Look at the image carefully.
+- Natural Details: Do strands of hair, skin texture, and fine patterns look organic? (Indicates REAL)
+- AI Artifacts: Do you see melted fingers, nonsensical text, asymmetrical eyes, or smooth "plastic" skin? (Indicates AI)
+- Compression: Do you see significant jpeg blocking, noise, or banding? These can trigger FALSE POSITIVE forensic alarms (high PRNU/Error Level Analysis).
 
-1. THE HARDWARE TRUTH (Highest Priority):
-     - If 'Physics & Sensor' category shows a 'Bayer Pattern', 'CFA', or 'Demosaicing' artifact:
-         - This is STRONG evidence of a REAL camera sensor.
-         - Bayer patterns are physical hardware artifacts from real camera color filter arrays.
-         - If the rule-based judge's pre-assessment says it dismissed PRNU due to a Bayer
-           contradiction, TRUST THAT ASSESSMENT. The PRNU anomaly is a false positive from
-           JPEG recompression/editing — real images that are resized or recompressed create
-           artificial periodic patterns that mimic synthetic grids while preserving genuine Bayer traces.
-         - IMPORTANT: A high PRNU PCE score (>10,000) combined with a real Bayer pattern means
-           the image was recompressed/edited, NOT that it was AI-generated. Do NOT override the
-           rule-based judge's Bayer correction.
-         - Only treat high PRNU as AI evidence if NO Bayer pattern is present AND the rule-based
-           judge did NOT dismiss it.
+=== THE HIERARCHY OF EVIDENCE ===
+1. VISUAL ANOMALIES & PHYSICS (Primary Inspection):
+   - Look for FAKE artifacts FIRST: Melted hands, asymmetrical eyes, weird text, or "plastic" skin = AI GENERATED.
+   - If the image is FLAWLESS but forensic tools scream FAKE (PRNU < -40), trust the forensics unless you see clear JPEG blocking.
+   - Only trust "Photorealism" if forensic scores are inconclusive (-20 to +20).
 
-2. THE CRYPTOGRAPHIC TRUTH:
-   - If 'Cryptographic' layer validates a camera signature (Sony, Canon, Nikon):
-     -> VERDICT MUST BE 'REAL'.
-   - If 'Cryptographic' validates an AI tool (Adobe Firefly, Midjourney):
-     -> VERDICT MUST BE 'AI-GENERATED'.
+2. THE "SOCIAL MEDIA" TRAP (Crucial for False Positives):
+   - Images from Google/Facebook/Insta are RESIZED and STRIPPED of metadata.
+   - Resizing creates GRID ARTIFACTS that fool PRNU detectors -> FALSE POSITIVE AI ALERT.
+   - If the image looks compressed (jpeg blocks) or is low resolution: DISCARD HIGH PRNU SCORES.
+   - If C2PA/Metadata is missing + Image is Compressed -> Assume the "Grid" is formatting, not AI.
 
-3. THE VISUAL CONSENSUS (The Neural Net Safety Net):
-   - If Neural Networks vote 'REAL' AND you see no obvious AI deformities:
-     -> VERDICT IS 'REAL'.
-     -> IGNORE 'Spectrum' or 'PRNU' alerts in this case. They are likely false positives from JPEG compression.
-     -> Do NOT hallucinate "smooth edges" to justify a negative forensic score.
+3. THE HARDWARE TRUTH (Secondary Verification):
+   - Presence of Bayer Pattern/CFA artifacts SUGGESTS a real sensor, BUT verify against Visuals. High-end AI can mimic this.
+   - Ignore high PRNU/Noise scores ONLY if you visually confirm heavy JPEG compression blocking OR it's a web-sourced image.
 
-4. THE TEXTURE PARADOX (Crucial for Nature/Animals):
-   - If PRNU/Spectrum signals are 'High/Fake' BUT the image contains complex organic textures (dense foliage, animal fur, messy hair):
-     -> TRUST YOUR EYES. High-frequency textures confuse mathematical detectors.
-     -> Verdict leans 'REAL' unless you see specific artifacts (melted hands, asymmetry).
+4. NEURAL CONSENSUS:
+   - Neural Networks are fallible on new models (Flux, MJv6).
+   - If Neural = REAL but Forensics = STRONG FAKE (-50), verify it's NOT a compression artifact first.
+
+=== VERDICT LOGIC ===
+- AI-GENERATED: Visual artifacts found OR strong forensic evidence (PRNU grid, Spectrum anomalies) without compression cause.
+- REAL: Natural details (pores, hair) + Physics (ISO noise, Bayer) + No AI artifacts.
+- EDITED: Real image with some manipulation (color, cropping) leading to mixed signals.
 
 === OUTPUT FORMAT ===
-You MUST respond with ONLY a valid JSON object. No markdown, no explanation outside JSON.
-Use this exact structure:
-
+You MUST respond with ONLY a valid JSON object.
 {
     "verdict": "REAL", "AI-GENERATED", "AI-ENHANCED", or "EDITED",
-    "confidence": 0.95,
-    "reasoning": "Start with the most decisive evidence layer. Explain how you resolved conflicts.",
-    "key_evidence": ["List", "of", "key", "evidence", "points"],
-    "contradictions_resolved": ["How you resolved each contradiction using visual + forensic evidence"]
+    "confidence": 0.0 to 1.0,
+    "reasoning": "Explain your visual analysis findings first, then how they align/conflict with the case file.",
+    "key_evidence": ["Visual: ...", "Forensic: ..."],
+    "contradictions_resolved": ["Resolved PRNU alert as compression artifact due to..."]
 }
 """
 
@@ -225,21 +220,32 @@ class ForensicAgent:
     def _call_gemini(self, prompt: str, image_path: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
         self._init_gemini()
         if not self._gemini_model: return None, "Gemini not configured"
-        try:
-            full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
-            if image_path:
-                import PIL.Image
-                # FIX: Use 'with' to ensure the file is closed immediately after use
-                with PIL.Image.open(image_path) as img:
-                    # We may need to force load the image if Gemini accesses it lazily, 
-                    # but usually passing the object is fine if done inside the block.
-                    img.load() 
-                    response = self._gemini_model.generate_content([full_prompt, img])
-            else:
-                response = self._gemini_model.generate_content(full_prompt)
-            return response.text, None
-        except Exception as e:
-            return None, f"Gemini error: {str(e)}"
+        
+        import time
+        for attempt in range(3):  # Retry up to 3 times
+            try:
+                full_prompt = f"{SYSTEM_PROMPT}\n\n{prompt}"
+                if image_path:
+                    import PIL.Image
+                    with PIL.Image.open(image_path) as img:
+                        img.load() 
+                        # Use list wrapping correctly for GenerativeModel
+                        response = self._gemini_model.generate_content([full_prompt, img])
+                else:
+                    response = self._gemini_model.generate_content(full_prompt)
+                
+                return response.text, None
+            
+            except Exception as e:
+                err_msg = str(e).lower()
+                if "429" in err_msg or "quota" in err_msg:
+                    wait = (attempt + 1) * 2  # Exponential backoff: 2s, 4s, 6s...
+                    print(f"[LLM Judge] Gemini 429 Limit Hit. Retrying in {wait}s...")
+                    time.sleep(wait)
+                    continue
+                return None, f"Gemini error: {str(e)}"
+        
+        return None, "Gemini quota exhausted after retries"
 
     def _call_groq(self, prompt: str, image_path: Optional[str] = None) -> Tuple[Optional[str], Optional[str]]:
         self._init_groq()
@@ -265,10 +271,14 @@ class ForensicAgent:
         # 1. Prepare Prompt
         case_string = case_file_to_prompt_string(case_file)
         special_instruction = case_file.get("special_instruction", "")
+        
+        # Build the Prompt - Emphasize Visuals
+        visual_reminder = "!!! PRIORITY INSTRUCTION: ANALYZE THE IMAGE SCENE FIRST. DO NOT BLINDLY TRUST THE SCORES. !!!"
+        
         if special_instruction:
-            full_prompt = f"!!! SPECIAL INSTRUCTION: {special_instruction} !!!\n\n=== CASE FILE DATA ===\n{case_string}\n\n=== END CASE FILE ==="
+            full_prompt = f"{visual_reminder}\n\n!!! SPECIAL INSTRUCTION: {special_instruction} !!!\n\n=== CASE FILE DATA ===\n{case_string}\n\n=== END CASE FILE ==="
         else:
-            full_prompt = f"=== CASE FILE DATA ===\n{case_string}\n\n=== END CASE FILE ==="
+            full_prompt = f"{visual_reminder}\n\n=== CASE FILE DATA ===\n{case_string}\n\n=== END CASE FILE ==="
 
         # 2. Select Provider Order
         providers = []
@@ -394,7 +404,7 @@ class HybridJudge:
         real_v = neural.get("real_votes", 0)
         ai_v = neural.get("ai_votes", 0)
         total = real_v + ai_v
-        if total >= 3 and abs(real_v - ai_v) <= 1:
+        if total >= 4 and abs(real_v - ai_v) <= 1:
             return True, f"Neural civil war: {real_v} Real vs {ai_v} AI votes"
 
         return False, ""
@@ -454,6 +464,45 @@ class HybridJudge:
         image_path: Optional[str] = None
     ) -> Tuple[str, int, str, Optional[LLMVerdict]]:
         
+        # ── Phase 0: Explicit Agent Escalation ──
+        if rule_based_verdict == "AMBIGUOUS_REQUIRES_AGENT":
+            print(f"[HybridJudge] Layer 5 requested agent escalation → launching debate/agent")
+            
+            if self.debate and image_path:
+                try:
+                    debate_result = self.debate.run_debate(
+                        image_path=image_path,
+                        case_file=case_file,
+                        contradiction_context=rule_based_description
+                    )
+                    
+                    if debate_result.verdict == "REAL":
+                        final_score = 50 + int(debate_result.confidence * 50)
+                    elif debate_result.verdict == "AI-GENERATED":
+                        final_score = 50 - int(debate_result.confidence * 50)
+                    else:
+                        final_score = 50
+                    
+                    return debate_result.verdict, final_score, f"[Debate Escalation] {debate_result.reasoning}", debate_result
+                except Exception as e:
+                    print(f"[HybridJudge] Escalated debate failed ({e}) → trying single agent")
+
+            # Fallback to single agent
+            if self.agent:
+                case_file["special_instruction"] = rule_based_description
+                llm_result = self.agent.make_final_call(case_file, image_path)
+                
+                if llm_result.verdict == "REAL":
+                    final_score = 50 + int(llm_result.confidence * 50)
+                elif llm_result.verdict == "AI-GENERATED":
+                    final_score = 50 - int(llm_result.confidence * 50)
+                else:
+                    final_score = 50
+                
+                return llm_result.verdict, final_score, f"[Agent Escalation] {llm_result.reasoning}", llm_result
+
+            return ("EDITED", 50, "Agent escalation requested but no LLM available", None)
+
         # ── Phase 1: Adversarial Debate for genuine contradictions ──
         if self.debate and image_path:
             should_debate, debate_context = self._should_debate(case_file)

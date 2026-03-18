@@ -52,16 +52,25 @@ class DebateOrchestrator:
             gemini_api_key=gemini_api_key or "",
             openrouter_api_key=openrouter_api_key or ""  # Fallback if Gemini quota exhausted
         )
-        self.defense = DefenseAgent(openrouter_api_key or "")
+        # Updated: Prioritize OpenRouter, but allow Gemini/Groq fallback
+        self.defense = DefenseAgent(
+            openrouter_api_key=openrouter_api_key or "",
+            gemini_api_key=gemini_api_key or "",
+            groq_api_key=groq_api_key or ""
+        )
         self.convergence = ConvergenceDetector(
             groq_api_key=groq_api_key,
             gemini_api_key=gemini_api_key   # Fallback if Groq unavailable
         )
+        
         self.max_rounds = 3
 
-        # Track whether we have real providers
+        # Track valid providers
         self._has_prosecution = bool(gemini_api_key or openrouter_api_key)
-        self._has_defense = bool(openrouter_api_key)
+        # Defense now has Gemini fallback
+        self._has_defense = bool(openrouter_api_key or gemini_api_key) 
+        # Convergence has Gemini fallback
+        self._has_convergence = bool(groq_api_key or gemini_api_key)
 
     def run_debate(
         self,
@@ -71,16 +80,31 @@ class DebateOrchestrator:
     ) -> DebateVerdict:
         """
         Run the adversarial debate and return a verdict.
-
-        Args:
-            image_path: Path to the image being analyzed
-            case_file: Compiled forensic case file from forensic_case_builder
-            contradiction_context: Description of detected contradictions
-
-        Returns:
-            DebateVerdict with verdict, confidence, reasoning, and full debate history
         """
         start_time = datetime.now()
+        
+        # Validate image exists before spending any API calls
+        import os
+        if not os.path.exists(image_path):
+            return DebateVerdict(
+                verdict="EDITED", confidence=0.0,
+                reasoning=f"Image not found: {image_path}",
+                source="invalid_input"
+            )
+
+        if not (self._has_prosecution and self._has_defense and self._has_convergence):
+            missing = []
+            if not self._has_prosecution: missing.append("Gemini/OpenRouter (prosecution)")
+            if not self._has_defense:     missing.append("OpenRouter/Gemini (defense)")
+            if not self._has_convergence: missing.append("Groq/Gemini (convergence)")
+            
+            print(f"[Debate] Missing API keys for: {', '.join(missing)}")
+            return DebateVerdict(
+                verdict="EDITED", confidence=0.0,
+                reasoning=f"Debate skipped. Missing API keys for: {', '.join(missing)}",
+                source="miss_keys"
+            )
+        
         case_string = case_file_to_prompt_string(case_file)
 
         if contradiction_context:
@@ -181,8 +205,13 @@ class DebateOrchestrator:
 
         # ── MAX ROUNDS REACHED — force final verdict ──
         print("[Debate] Max rounds reached — forcing final convergence verdict")
-        final_convergence = self.convergence.check(debate_history, case_string)
+        # Problem 4 Fix: Use explicit "must decide" instruction
+        final_convergence = self.convergence.check(
+            debate_history, 
+            case_string + "\n\nFINAL ROUND: You MUST return has_converged=true now."
+        )
 
+        # Fallback if convergence still refuses (rare)
         if not final_convergence.has_converged:
             # Convergence judge still undecided — use confidence differential
             last_p = debate_history[-1]['prosecution']

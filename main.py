@@ -71,10 +71,11 @@ except ImportError as e:
 try:
        from Universal_Detector.src.layers.forensic_case_builder import compile_case_file
        from Universal_Detector.src.layers.llm_judge import HybridJudge, LLMVerdict
+       from Universal_Detector.src.layers.debate.models import OPENROUTER_VISION_MODELS
 except ImportError as e:
-    print(f"CRITICAL: Missing core system modules (builder/judge). {e}")
-    sys.exit(1)
-
+    print(f"CRITICAL: Missing core system modules (builder/judge/debate). {e}")
+    # Allow partial failure if debate models missing, but warn
+    OPENROUTER_VISION_MODELS = []
 
 @dataclass
 class DetectionResult:
@@ -257,19 +258,21 @@ class AIImageDetector:
         except Exception: layer_scores["watermark"] = 0
 
         # --- LAYER 8.5: PRNU ---
+        prnu_details_dict = {}
         self.log("Layer 8.5: PRNU Sensor Fingerprint")
         try:
-            prnu_score, prnu_desc = analyze_prnu(image_path, is_jpeg_hint=is_jpeg)
+            prnu_score, prnu_desc, prnu_details_dict = analyze_prnu(image_path, is_jpeg_hint=is_jpeg)
             layer_scores["prnu"] = prnu_score
             layer_details["prnu"] = prnu_desc
         except Exception: layer_scores["prnu"] = 0
 
         # --- LAYER 9: CONTEXT ---
+        context_data_dict = {}
         self.log("Layer 9: Context")
         try:
-            c_score, c_det = analyze_context(image_path)
+            c_score, context_data_dict = analyze_context(image_path)
             layer_scores["context"] = c_score
-            layer_details["context"] = c_det.get("note", "")
+            layer_details["context"] = context_data_dict.get("note", "")
         except Exception: layer_scores["context"] = 0
 
         # --- LAYER 10: SHADOW ---
@@ -300,7 +303,7 @@ class AIImageDetector:
         # LAYER 5: MASTER JUDGE (Rule-Based)
         # ========================================
         self.log("Layer 5: Master Judge (Rule-Based)")
-        final_score, verdict, description = calculate_integrity(
+        final_score, verdict, description, effective_scores = calculate_integrity(
             c2pa_res=c2pa_result,
             meta_score=layer_scores.get("metadata", 0),
             physics_score=layer_scores.get("physics", 0),
@@ -311,8 +314,9 @@ class AIImageDetector:
             watermark_score=layer_scores.get("watermark", 0),
             watermark_desc=layer_details.get("watermark", ""),
             prnu_score=layer_scores.get("prnu", 0),
+            prnu_details=prnu_details_dict,
             context_score=layer_scores.get("context", 0),
-            context_details={"note": layer_details.get("context", "")},
+            context_details=context_data_dict,
             shadow_score=layer_scores.get("shadow", 0),
             shadow_desc=layer_details.get("shadow", ""),
             artifact_score=layer_scores.get("artifacts", 0),
@@ -348,12 +352,14 @@ class AIImageDetector:
                     rule_based_score=rule_based_score,
                     rule_based_description=rule_based_description,
                     c2pa_result=c2pa_result,
+                    image_description=None,
                     is_jpeg=is_jpeg,
                     visual_confidence=visual_confidence,
                     model_consensus=model_consensus,
                     model_real_votes=model_real_votes,
                     model_ai_votes=model_ai_votes,
-                    warnings=self.warnings
+                    warnings=self.warnings,
+                    effective_scores=effective_scores
                 )
 
                 # 2. Consult Hybrid Judge
@@ -479,6 +485,47 @@ if __name__ == "__main__":
 
 # --- FastAPI App ---
 app = FastAPI(title="AI Image Detection v6.0")
+
+# --- MODEL HEALTH CHECK ---
+@app.on_event("startup")
+async def check_api_health():
+    """Verify primary models and fallbacks on startup."""
+    print("\n[Startup] Checking Model Health...")
+    
+    # Check Gemini
+    gemini_key = os.getenv("GOOGLE_AI_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if gemini_key:
+        print(f"✅ Gemini API Key found: {gemini_key[:5]}...")
+    else:
+        print("❌ Gemini API Key MISSING")
+
+    # Check OpenRouter Fallback Chain
+    openrouter_key = os.getenv("OPENROUTER_API_KEY")
+    if openrouter_key:
+        print(f"✅ OpenRouter API Key found: {openrouter_key[:5]}...")
+        print(f"   Configured Fallback Chain ({len(OPENROUTER_VISION_MODELS)} models):")
+        for i, model in enumerate(OPENROUTER_VISION_MODELS):
+            print(f"   {i+1}. {model}")
+        
+        # Simple connectivity check
+        print("   Checking OpenRouter connectivity...")
+        import requests
+        try:
+            resp = requests.get("https://openrouter.ai/api/v1/auth/key", 
+                              headers={"Authorization": f"Bearer {openrouter_key}"}, 
+                              timeout=2)  # Ultra-short timeout to prevent startup hang
+            if resp.status_code == 200:
+                print("   ✅ OpenRouter Connectivity: OK")
+            else:
+                print(f"   ⚠️ OpenRouter Connectivity Check Failed: {resp.status_code}")
+        except Exception as e:
+             print(f"   ⚠️ OpenRouter Connectivity Check Error: {e}")
+    else:
+        print("❌ OpenRouter API Key MISSING - Debate/Defense agents will fail.")
+
+    print("[Startup] Health check complete.\n")
+
+
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 api_detector = AIImageDetector(enable_llm_judge=os.getenv("ENABLE_LLM_JUDGE", "true").lower() == "true")

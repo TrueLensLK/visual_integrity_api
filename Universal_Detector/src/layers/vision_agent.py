@@ -86,7 +86,12 @@ def run_vision_agent(image_path: str) -> dict:
         }
     }
 
-    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+    except Exception as e:
+        print(f"[Vision Agent] Connection failed: {e}")
+        raise RuntimeError("Gemini API connection failed.")
+
     if response.status_code != 200:
         print(f"[Vision Agent] API Error: {response.status_code} {response.text}")
         raise RuntimeError("Gemini API call failed.")

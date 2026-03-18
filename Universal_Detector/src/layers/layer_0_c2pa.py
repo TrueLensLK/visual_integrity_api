@@ -57,8 +57,8 @@ class SignatureRegistry:
         #Attempts to pull from official C2PA and IPTC registries
         updated = False
         try:
-            # Sync C2PA Conforming Products
-            resp = requests.get(self.SOURCES["c2pa"], timeout=5)
+            # Sync C2PA Conforming Products (with short timeout)
+            resp = requests.get(self.SOURCES["c2pa"], timeout=3)
             if resp.status_code == 200:
                 products = resp.json().get("products", [])
                 new_gens = {p['name'].lower() for p in products if p.get('ai_gen') is True}

@@ -58,11 +58,11 @@ def classify_evidence_strength(score: float) -> str:
     elif score < 40: return "MODERATE REAL"
     else: return "STRONG REAL"
 
-def identify_contradictions(layer_scores: Dict[str, float], layer_details: Dict[str, str]) -> list:
+def identify_contradictions(layer_scores: Dict[str, float], layer_details: Dict[str, str], is_jpeg: bool = False, effective_scores: Optional[Dict[str, float]] = None) -> list:
     """Identify conflicts between categories."""
     contradictions = []
     
-    # Calculate category averages
+    # Calculate category averages (Using RAW scores)
     cat_scores = {}
     for layer, score in layer_scores.items():
         cat = get_category(layer)
@@ -81,25 +81,45 @@ def identify_contradictions(layer_scores: Dict[str, float], layer_details: Dict[
     # Check 2: The Resizing Paradox (PRNU says Fake, Others say Real)
     prnu = layer_scores.get("prnu", 0)
     nn = layer_scores.get("neural_network", 0)
-    if prnu < -30 and nn > 30:
+    
+    # Logic Update: If image is JPEG compressed, PRNU grids are often artifacts
+    if prnu < -30 and nn > 20 and is_jpeg:
         contradictions.append({
+            "type": "SOCIAL_MEDIA_COMPRESSION",
+            "note": "High PRNU/Grid score (-30 or worse) in a compressed JPEG/Social Media image. "
+                    "This is a COMMON FALSE POSITIVE. Resizing algorithms create grid-like artifacts "
+                    "that mimic AI generation. If the image visually looks real (people, nature), "
+                    "DISREGARD the PRNU signal."
+        })
+    elif prnu < -30 and nn > 30:
+         contradictions.append({
             "type": "RESIZING_ARTIFACT",
             "note": "PRNU indicates a grid (Fake), but Neural Networks see a natural image. Likely a resized/screenshot real image."
         })
 
+    # NEW CHECK: Suppression Detection (Raw vs Effective)
+    # If a score was significantly dampened by the Rule-Based Judge, flag it for the LLM.
+    if effective_scores:
+        for layer, raw_score in layer_scores.items():
+            eff_score = effective_scores.get(layer, raw_score)
+            if raw_score <= -30 and eff_score > -15:
+                # Strong FAKE signal was suppressed
+                contradictions.append({
+                    "type": "SUPPRESSED_SIGNAL",
+                    "note": f"The '{layer}' signal was dampened from {raw_score} (STRONG FAKE) to {eff_score} by the Rule-Based Judge. "
+                            f"Investigate if this suppression was valid (e.g. compression artifact) or a missed detection."
+                })
+
     # Check 3: PRNU Synthetic Grid vs Bayer Pattern (Physics)
     # Bayer demosaicing is a hardware artifact from real camera sensors.
-    # If physics detects Bayer AND PRNU says synthetic grid, the PRNU is
-    # almost certainly a false positive from JPEG recompression.
+    # However, high-quality AI can sometimes mimic periodic patterns or checkerboard artifacts.
     physics = layer_scores.get("physics", 0)
-    if prnu < -30 and physics > 10:
+    if prnu < -40 and physics > 10:
         contradictions.append({
             "type": "BAYER_PRNU_CONTRADICTION",
-            "note": f"PRNU synthetic grid (score={prnu}) contradicts Bayer demosaicing from physics (score=+{physics}). "
-                    f"Bayer patterns prove real camera sensor origin. The PRNU anomaly is likely a false positive "
-                    f"from JPEG recompression or editing — real images that are resized/recompressed generate "
-                    f"artificial periodic patterns that mimic synthetic grids. The rule-based judge has already "
-                    f"dismissed the PRNU score due to this contradiction."
+            "note": f"PRNU indicates a strong synthetic grid (score={prnu}), but physics detected Bayer-like patterns (score=+{physics}). "
+                    f"While Bayer usage suggests a real sensor, sophisticated AI (GANs) can generate checkerboard artifacts "
+                    f"that mimic this. Do NOT automatically dismiss the PRNU score if the image shows other AI signs."
         })
 
     return contradictions
@@ -118,7 +138,8 @@ def compile_case_file(
     model_consensus: float = 0.0,
     model_real_votes: int = 0,
     model_ai_votes: int = 0,
-    warnings: Optional[list] = None
+    warnings: Optional[list] = None,
+    effective_scores: Optional[Dict[str, float]] = None
 ) -> Dict[str, Any]:
     
     case_id = generate_case_id(image_path)
@@ -133,12 +154,21 @@ def compile_case_file(
     all_evidence_flat = []
     
     for layer_name, score in layer_scores.items():
+        eff_score = effective_scores.get(layer_name, score) if effective_scores else score
+        
         item = {
             "layer": layer_name,
-            "score": score,
-            "strength": classify_evidence_strength(score),
+            "raw_score": score,
+            "effective_score": eff_score,
+            "score": eff_score, # Backward compatibility for formatters
+            "strength": classify_evidence_strength(eff_score), # Use EFFECTIVE strength here
             "detail": layer_details.get(layer_name, "No detail provided")
         }
+        
+        # Add suppression flag if difference is significant
+        if abs(score - eff_score) > 10:
+            item["suppressed"] = True
+            item["raw_strength"] = classify_evidence_strength(score)
         
         cat = get_category(layer_name)
         evidence_by_category[cat].append(item)
@@ -155,10 +185,11 @@ def compile_case_file(
         },
         # CRITICAL: Expose raw scores at root so LLM Judge can find them easily
         "layer_scores": layer_scores,
+        "effective_scores": effective_scores or layer_scores, # Expose effective as well
         "evidence_by_category": evidence_by_category,
         "all_evidence": all_evidence_flat,
         "cryptographic": c2pa_result or {},
-        "contradictions": identify_contradictions(layer_scores, layer_details),
+        "contradictions": identify_contradictions(layer_scores, layer_details, is_jpeg=is_jpeg, effective_scores=effective_scores),
         "neural_consensus": {
             "real_votes": model_real_votes,
             "ai_votes": model_ai_votes,
@@ -194,7 +225,7 @@ def case_file_to_prompt_string(case_file: Dict[str, Any]) -> str:
     # Check strictly for Bayer patterns in details
     bayer_found = any("bayer" in e['detail'].lower() for e in physics_layers)
     if bayer_found:
-        lines.append("HARDWARE: Bayer/CFA Pattern Detected -> STRONG REAL INDICATOR.")
+        lines.append("HARDWARE: Bayer/CFA Pattern Detected (Real hardware artifact, but check for AI mimicry).")
     lines.append("")
 
     # 2. Categorized Dashboard (The "Full Spectrum" View)
@@ -205,13 +236,25 @@ def case_file_to_prompt_string(case_file: Dict[str, Any]) -> str:
         if not items: continue
         
         # Calculate category average for quick insight
-        avg_score = sum(i['score'] for i in items) / len(items)
+        # Use effective score for average
+        avg_score = sum(i.get('effective_score', i.get('score', 0)) for i in items) / len(items)
         status = "REAL" if avg_score > 10 else ("FAKE" if avg_score < -10 else "NEUTRAL")
         
         lines.append(f"\n--- {category.upper()} (Trend: {status}) ---")
         for item in items:
-            icon = "" if item['score'] > 15 else ("" if item['score'] < -15 else "⚪")
-            lines.append(f"  {icon} [{item['layer'].ljust(15)}] Score: {item['score']:+05.1f} | {item['detail']}")
+            # Display effective score primarily, but show raw if significantly different
+            eff_val = item.get('effective_score', item.get('score', 0))
+            raw_val = item.get('raw_score', eff_val)
+            
+            score_display = f"{eff_val:+05.1f}"
+            suppressed_marker = ""
+            
+            if abs(eff_val - raw_val) > 10:
+                score_display += f" (Raw: {raw_val:+05.1f})"
+                suppressed_marker = "[SUPPRESSED]"
+            
+            icon = "✅" if eff_val > 25 else ("❌" if eff_val < -25 else "⚫")
+            lines.append(f"  {icon} {suppressed_marker} [{item['layer'].ljust(15)}] Score: {score_display} | {item['detail']}")
 
     # 3. Neural Consensus
     lines.append(f"\n===  VISUAL CONSENSUS ===")
