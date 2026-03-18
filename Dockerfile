@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.4
 # ===========================================================================
 # Stage: runtime
 # Base: python:3.12-slim — matches the venv Python version in use (3.12.7),
@@ -14,18 +15,18 @@ FROM python:3.12-slim
 #   PYTHONUNBUFFERED=1         – forces stdout/stderr to flush immediately so
 #                                uvicorn logs reach the container runtime
 #                                (Docker, K8s) without buffering delay.
-#   PIP_NO_CACHE_DIR=1         – pip's HTTP cache is useless inside an image
-#                                build; skip it to save ~50 MB per install.
 #   PIP_DISABLE_PIP_VERSION_CHECK=1 – suppresses the "new pip available"
 #                                     noise that pollutes build logs.
 #   PIP_DEFAULT_TIMEOUT=300    – increase socket timeout to 5 minutes to
 #                                handle slow PyPI downloads (default is 15s).
 #   PIP_RETRIES=5              – retry failed downloads up to 5 times to
 #                                handle transient network issues.
+#
+# NOTE: We intentionally DO NOT set PIP_NO_CACHE_DIR because we use BuildKit
+# cache mounts (--mount=type=cache) to persist downloaded wheels across builds.
 # ---------------------------------------------------------------------------
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_DEFAULT_TIMEOUT=300 \
     PIP_RETRIES=5
@@ -94,13 +95,18 @@ WORKDIR /app
 # ---------------------------------------------------------------------------
 COPY requirements.txt .
 
-# Install dependencies in two phases for better reliability:
-# Phase 1: Install PyTorch separately (largest package, most likely to timeout)
+# Install dependencies using BuildKit cache mounts.
+# --mount=type=cache persists the pip download cache across builds, so even if
+# the layer is invalidated, previously downloaded wheels don't need re-downloading.
+# This is critical when building from Git URL contexts where layer caching is weak.
+#
+# Phase 1: Install PyTorch separately (largest packages ~1GB+, most likely to timeout)
 # Phase 2: Install remaining dependencies
-RUN pip install --no-cache-dir --timeout 600 \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --timeout 600 \
         "torch>=2.1.0" \
         "torchvision>=0.16.0" \
-    && pip install --no-cache-dir --timeout 300 -r requirements.txt
+    && pip install --timeout 300 -r requirements.txt
 
 # ---------------------------------------------------------------------------
 # Application source
