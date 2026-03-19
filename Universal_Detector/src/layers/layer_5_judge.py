@@ -1,18 +1,5 @@
 """
-Layer 5: Master Judge v3.3 - THE CONSENSUS + SAFETY EDITION
-
-KEY PHILOSOPHY:
-  1. Model Consensus has veto power over lone forensic signals
-  2. PRNU synthetic grid needs corroboration OR high confidence
-  3. Texture/compression issues get EDITED, not AI-GENERATED
-  4. Hardware Veto protects real photos from neural network errors
-
-VERSION HISTORY:
-  v2.3 - Redemption Logic for authentic textures
-  v3.0 - Hardware Veto + Lonewolf Rule + Edited Real Safety Net
-  v3.1 - Model Consensus for compressed images
-  v3.2 - Kill switches for definitive AI evidence
-  v3.3 - FIXED: Consensus pre-check, PRNU corroboration, compressed detection
+Layer 5: Master Judge
 """
 
 from typing import Tuple, Dict
@@ -202,21 +189,19 @@ LAYER_WEIGHTS = {
     "context":   0.03,
 }
 
-# Weights for compressed images (hardware evidence destroyed)
-# v3.4: Bumped visual (0.15→0.20) and artifacts (0.03→0.08) since these
-#        are the most reliable signals when hardware evidence is destroyed.
-#        Trimmed face, eye, spectrum, geometry to compensate. Sum = 1.00.
+# Weights for compressed images bcz normally google images are compressed and we want to avoid false positives from PRNU and spectrum layers
+
 COMPRESSED_LAYER_WEIGHTS = {
-    "visual":    0.20,  # BOOSTED: Content-level analysis is strongest for web images
-    "spectrum":  0.20,  # BOOSTED: Diffusion artifacts survive compression
+    "visual":    0.20,  # Content-level analysis is strongest for web images
+    "spectrum":  0.20,  # Diffusion artifacts survive compression
     "prnu":      0.02,  # Almost ignore — destroyed by compression
-    "physics":   0.15,  # BOOSTED: 3D physics cannot be faked by 2D generators
-    "shadow":    0.12,  # BOOSTED: Inconsistent light vectors
+    "physics":   0.15,  # 3D physics cannot be faked by 2D generators
+    "shadow":    0.12,  # Inconsistent light vectors
     "face":      0.05,  # Reduced — face detection less reliable on compressed
     "physical_continuity": 0.08,
     "eye":       0.04,  # Reduced — reflections degraded by compression
     "watermark": 0.04,
-    "artifacts": 0.08,  # BOOSTED: Spatial autocorrelation survives JPEG
+    "artifacts": 0.08,  # Spatial autocorrelation survives JPEG
     "metadata":  0.00,  # Dead on web
     "context":   0.02,
 }
@@ -248,17 +233,17 @@ def calculate_integrity(
     model_ai_votes: int = 0,
     model_count: int = 0,
     model_consensus: float = 0.0,
-    # NEW v3.3: PRNU confidence metrics
+    # PRNU confidence metrics
     prnu_flat_region_ratio: float = 1.0,  # 0-1, how much of image was flat regions
     prnu_details: Dict = None,
     # NEW v3.4: Bayer pattern flag (from physics layer details)
     has_bayer_pattern: bool = False,
-) -> Tuple[int, str, str]:
+) -> Tuple[int, str, str, Dict[str, float]]:
     """
     Master Judge v3.3 - Makes final verdict with safety checks
     
     Returns:
-        (final_score, verdict, description)
+        (final_score, verdict, description, effective_scores)
     """
 
     # 1. RAW SCORE COLLECTION
@@ -298,10 +283,19 @@ def calculate_integrity(
             and raw_scores.get('watermark', 0) > -40
             and not is_jpeg):  # JPEG compression creates false PRNU grids
         if raw_scores.get('eye', 0) > 0 or raw_scores.get('spectrum', 0) > 0:
+            # Dynamic Score Calculation
+            prnu_strength = abs(raw_scores.get('prnu', 0)) / 50.0
+            physics_strength = raw_scores.get('physics', 0) / 50.0
+            corroboration = 1.0 if (raw_scores.get('eye', 0) > 0 and raw_scores.get('spectrum', 0) > 0) else 0.6
+
+            confidence = (prnu_strength * 0.5 + physics_strength * 0.3 + corroboration * 0.2)
+            dynamic_score = int(35 + (1 - confidence) * 20)  # range: 35–55
+
             return (
-                45,
+                dynamic_score,
                 "AI-ENHANCED",
-                "Authentic base photograph detected, but exhibits severe AI-upscaling or heavy digital enhancement (Synthetic 128px grid overriding natural sensor noise)."
+                f"Authentic base detected, but exhibits severe AI-upscaling (PRNU={raw_scores.get('prnu', 0):.1f}, Physics={raw_scores.get('physics', 0):.1f})",
+                raw_scores
             )
 
     # ========================================================================
@@ -427,14 +421,14 @@ def calculate_integrity(
     if c2pa_res.get("status") == "valid":
         if c2pa_res.get("is_ai_flagged"):
             print("  → C2PA confirms AI")
-            return (0, "AI-GENERATED", f"C2PA confirms AI: {c2pa_res.get('ai_tool')}")
+            return (0, "AI-GENERATED", f"C2PA confirms AI: {c2pa_res.get('ai_tool')}", raw_scores)
         
         print("  → C2PA confirms authentic")
-        return (98, "REAL", "Cryptographically verified camera original")
+        return (98, "REAL", "Cryptographically verified camera original", raw_scores)
     
     if c2pa_res.get("status") == "tampered":
         print("  → C2PA tampered")
-        return (15, "AI-GENERATED", "C2PA signature tampering detected")
+        return (15, "AI-GENERATED", "C2PA signature tampering detected", raw_scores)
 
     # ========================================================================
     # TIER 1: KILL SWITCHES (With Safety Checks) - v3.3 FIXED
@@ -457,6 +451,10 @@ def calculate_integrity(
         prnu_score = -15
 
     elif prnu_score <= -45:
+        # Use PRNU details if provided for audit
+        if prnu_details:
+             print(f"    PRNU Details: {prnu_details}")
+
         print(f"\n  [Kill Switch 1] PRNU reports synthetic grid (score={prnu_score})")
 
         # FIX-8: BAYER CONTRADICTION CHECK
@@ -489,7 +487,8 @@ def calculate_integrity(
                 return (
                     50,
                     "EDITED",
-                    f"PRNU false positive likely (only {prnu_flat_region_ratio:.1%} flat regions, texture interference)"
+                    f"PRNU false positive likely (only {prnu_flat_region_ratio:.1%} flat regions, texture interference)",
+                    raw_scores
                 )
         
         else:
@@ -505,10 +504,18 @@ def calculate_integrity(
             if model_consensus_override == "REAL":
                 print(f"    [!] MODEL CONSENSUS OVERRIDE: {model_real_votes}/{model_count} models say REAL")
                 print(f"    → PRNU synthetic grid vs model consensus = CONFLICT")
+
+                # Dynamic scoring for PRNU conflict
+                prnu_strength = abs(prnu_score) / 50.0
+                model_strength = model_real_votes / max(1.0, float(model_count))
+                conflict_conf = (prnu_strength * 0.6 + (1 - model_strength) * 0.4)
+                dynamic_conflict_score = int(35 + (1 - conflict_conf) * 20)
+
                 return (
-                    45,
+                    dynamic_conflict_score,
                     "EDITED",
-                    f"PRNU synthetic grid conflicts with model consensus ({model_real_votes}/{model_count} REAL)"
+                    f"PRNU synthetic grid (PRNU={prnu_score:.1f}) conflicts with model consensus ({model_real_votes}/{model_count} REAL)",
+                    raw_scores
                 )
             
             elif model_consensus_override == "UNCERTAIN_PRNU_FP":
@@ -516,7 +523,8 @@ def calculate_integrity(
                 return (
                     50,
                     "EDITED",
-                    "PRNU lone wolf vs neural network consensus - possible false positive"
+                    "PRNU lone wolf vs neural network consensus - possible false positive",
+                    raw_scores
                 )
             
             # No model consensus override - check traditional corroboration
@@ -527,15 +535,13 @@ def calculate_integrity(
                 return (
                     5,
                     "AI-GENERATED",
-                    f"Synthetic grid (PRNU) corroborated by {', '.join(other_ai_signals)}"
+                    f"Synthetic grid (PRNU) corroborated by {', '.join(other_ai_signals)}",
+                    raw_scores
                 )
             
             elif prnu_score == -50:
-                # Maximum PRNU confidence without corroboration
-                # Be cautious but still flag
                 print(f"    ! Maximum PRNU confidence but NO corroboration")
-                print(f"    → Continuing to weighted analysis with heavy penalty")
-                # Don't kill switch - let it flow through weighted scoring
+                return (35, "EDITED", "Maximum PRNU synthetic grid confidence — no corroboration, inconclusive", raw_scores)
     
     # ------------------------------------------------------------------------
     # KILL SWITCH 2: Artifact Grid Pattern
@@ -550,7 +556,7 @@ def calculate_integrity(
             raw_scores["artifacts"] = -20
         else:
             print(f"    → KILL SWITCH ACTIVATED")
-            return (8, "AI-GENERATED", "GAN/Diffusion synthesis grid detected")
+            return (8, "AI-GENERATED", f"GAN/Diffusion synthesis grid detected (Artifacts={artifact_score:.1f})", raw_scores)
     
     # ------------------------------------------------------------------------
     # KILL SWITCH 3: Physical Continuity Violations
@@ -560,12 +566,13 @@ def calculate_integrity(
         
         # This is very reliable - don't override
         # But check if it's outdoor natural lighting (false positive)
-        if "outdoor" in str(raw_scores) or "natural lighting" in str(raw_scores):
+        scene_type = context_details.get("scene_type", "")
+        if "outdoor" in scene_type or "natural" in scene_type:
             print(f"    [!] May be outdoor scene with natural ambient light")
             raw_scores["physical_continuity"] = -15
         else:
             print(f"    → KILL SWITCH ACTIVATED")
-            return (10, "AI-GENERATED", "Physically impossible geometry")
+            return (10, "AI-GENERATED", f"Physically impossible geometry (Continuity={physical_continuity_score:.1f})", raw_scores)
     
     # ------------------------------------------------------------------------
     # KILL SWITCH 4: Strong Watermark
@@ -585,7 +592,7 @@ def calculate_integrity(
             if len(other_ai) >= 1:
                 print(f"    [+] Corroborated by {other_ai}")
                 print(f"    → KILL SWITCH ACTIVATED")
-                return (5, "AI-GENERATED", f"AI watermark ({watermark_desc})")
+                return (5, "AI-GENERATED", f"AI watermark ({watermark_desc})", raw_scores)
             else:
                 print(f"    ! No corroboration - continuing")
     
@@ -596,7 +603,7 @@ def calculate_integrity(
         print(f"\n  [Kill Switch 5] Deepfake signature")
         print(f"    PRNU={prnu_score} (real sensor) + Face={face_score} (anomalous)")
         print(f"    → KILL SWITCH ACTIVATED")
-        return (15, "AI-GENERATED", "Deepfake: Real camera base with AI face")
+        return (15, "AI-GENERATED", f"Deepfake: Real camera base (PRNU={prnu_score:.1f}) with AI face (Face={face_score:.1f})", raw_scores)
     
 
     # ------------------------------------------------------------------------
@@ -618,7 +625,8 @@ def calculate_integrity(
             return (
                 30, 
                 "AMBIGUOUS_REQUIRES_AGENT", 
-                f"SOTA Conflict: Visual consensus is REAL, but Physics failed ({', '.join(sota_giveaways)}). Escalate to LLM Agent with Tool Nodes."
+                f"SOTA Conflict: Visual consensus is REAL, but Physics failed ({', '.join(sota_giveaways)}). Escalate to LLM Agent with Tool Nodes.",
+                raw_scores
             )
 
     print(f"\n  [+] No kill switches activated")
@@ -703,9 +711,9 @@ def calculate_integrity(
         any_ai_signals = sum(1 for s in effective_scores.values() if s <= -15)
         
         if any_ai_signals >= 2:
-            return (70, "EDITED_REAL", "Physical camera DNA with AI post-processing")
+            return (70, "EDITED_REAL", "Physical camera DNA with AI post-processing", effective_scores)
         else:
-            return (90, "REAL", "Physical sensor DNA verified (PRNU + Spectrum)")
+            return (90, "REAL", "Physical sensor DNA verified (PRNU + Spectrum)", effective_scores)
 
     # ========================================================================
     # TIER 3: MODEL CONSENSUS VERDICT (For compressed images)
@@ -716,27 +724,27 @@ def calculate_integrity(
         # Strong REAL consensus
         if model_real_votes >= 4 and model_consensus >= 0.65:
             ai_artifacts = [k for k, s in effective_scores.items() 
-                          if s <= -25 and k in ["spectrum", "face", "eye", "watermark"]]
+                          if s <= -25 and k not in ["context", "visual", "metadata"]]
             
             if len(ai_artifacts) == 0:
                 print(f"  [+] {model_real_votes}/{model_count} models say REAL, no AI artifacts")
-                return (72, "LIKELY_REAL", f"Model consensus ({model_real_votes}/{model_count} REAL)")
+                return (72, "LIKELY_REAL", f"Model consensus ({model_real_votes}/{model_count} REAL)", effective_scores)
             else:
                 print(f"  ! Models say REAL but {len(ai_artifacts)} artifacts found: {ai_artifacts}")
         
         # Strong AI consensus
         elif model_ai_votes >= 4:
             print(f"  [-] {model_ai_votes}/{model_count} models say AI")
-            return (20, "AI-GENERATED", f"Model consensus ({model_ai_votes}/{model_count} AI)")
+            return (20, "AI-GENERATED", f"Model consensus ({model_ai_votes}/{model_count} AI)", effective_scores)
         
         # Moderate REAL consensus
         elif model_real_votes >= 3 and visual_score > 10:
             ai_artifacts = [k for k, s in effective_scores.items() 
-                          if s <= -20 and k in ["spectrum", "face", "eye", "watermark"]]
+                          if s <= -20 and k not in ["context", "visual", "metadata"]]
             
             if len(ai_artifacts) == 0:
                 print(f"  [ ] {model_real_votes}/{model_count} models REAL, no artifacts")
-                return (65, "LIKELY_REAL", f"Moderate consensus ({model_real_votes}/{model_count} REAL)")
+                return (65, "LIKELY_REAL", f"Moderate consensus ({model_real_votes}/{model_count} REAL)", effective_scores)
 
     # ========================================================================
     # TIER 4: WATERMARK WITH CORROBORATION
@@ -746,7 +754,7 @@ def calculate_integrity(
                    if k != "watermark" and s <= -20]
         
         if len(other_ai) >= 1:
-            return (5, "AI-GENERATED", f"Watermark + {len(other_ai)} corroboration(s)")
+            return (5, "AI-GENERATED", f"Watermark + {len(other_ai)} corroboration(s)", effective_scores)
         elif is_texture_authentic:
             print(f"[Judge] Watermark in real-texture image dismissed")
         elif is_compressed_image and model_real_votes >= 3:
@@ -755,9 +763,9 @@ def calculate_integrity(
             # and there's no corroboration, treat as EDITED rather than AI.
             print(f"[Judge] [!] Lone watermark on compressed image with {model_real_votes}/{model_count} models REAL")
             print(f"    → Downgrading from AI-GENERATED to EDITED")
-            return (55, "EDITED", f"Watermark FP likely (compressed + {model_real_votes}/{model_count} models REAL)")
+            return (55, "EDITED", f"Watermark FP likely (compressed + {model_real_votes}/{model_count} models REAL)", effective_scores)
         else:
-            return (25, "AI-GENERATED", "AI watermark (no corroboration but no real texture)")
+            return (25, "AI-GENERATED", "AI watermark (no corroboration but no real texture)", effective_scores)
 
     # ========================================================================
     # TIER 5: PHYSICAL IMPOSSIBILITIES (with corroboration)
@@ -765,10 +773,10 @@ def calculate_integrity(
     ai_indicators = [k for k, s in effective_scores.items() if s <= -25 and k != "context"]
     
     if effective_scores["eye"] <= -45 and len(ai_indicators) >= 2:
-        return (8, "AI-GENERATED", "Impossible corneal reflections (corroborated)")
+        return (8, "AI-GENERATED", f"Impossible corneal reflections (Eye={effective_scores['eye']:.1f}, corroborated)", effective_scores)
     
     if effective_scores["shadow"] <= -40 and len(ai_indicators) >= 2:
-        return (12, "AI-GENERATED", "Impossible shadow geometry (corroborated)")
+        return (12, "AI-GENERATED", f"Impossible shadow geometry (Shadow={effective_scores['shadow']:.1f}, corroborated)", effective_scores)
 
     # ========================================================================
     # TIER 6: EDITED REAL SAFETY NET
@@ -777,9 +785,9 @@ def calculate_integrity(
         strong_ai = [k for k, s in effective_scores.items() if s <= -30 and k != "context"]
         
         if len(strong_ai) == 1:
-            return (70, "EDITED_REAL", f"Authentic base + {strong_ai[0]} modification")
+            return (70, "EDITED_REAL", f"Authentic base + {strong_ai[0]} modification", effective_scores)
         elif len(strong_ai) == 0:
-            return (85, "REAL", "Authentic texture, no AI signatures")
+            return (85, "REAL", "Authentic texture, no AI signatures", effective_scores)
 
     # ========================================================================
     # TIER 7: WEIGHTED AUTHENTICITY SCORE
@@ -807,7 +815,7 @@ def calculate_integrity(
     if active_weight_sum > 0:
         final_auth = (weighted_sum / active_weight_sum) * 100
     else:
-        return (50, "EDITED", "All layers neutral - insufficient signal")
+        return (50, "EDITED", "All layers neutral - insufficient signal", effective_scores)
     
     strong_ai_count = sum(1 for s in effective_scores.values() if s <= -20)
     strong_real_count = sum(1 for s in effective_scores.values() if s >= 15)
@@ -821,33 +829,37 @@ def calculate_integrity(
     # TIER 8: FINAL VERDICT MAPPING
     # REAL verdict
     if final_auth >= 65:
-        return (int(final_auth), "REAL", "Strong multi-layer authenticity")
+        return (int(final_auth), "REAL", "Strong multi-layer authenticity", effective_scores)
     
     if final_auth >= 55 and strong_real_count >= 2:
-        return (int(final_auth), "REAL", "Multiple forensic layers indicate camera source")
+        return (int(final_auth), "REAL", "Multiple forensic layers indicate camera source", effective_scores)
     
     # AI verdict (requires 2+ signals)
     if final_auth <= 35 and strong_ai_count >= 2:
-        return (int(final_auth), "AI-GENERATED", f"Consensus AI detection ({strong_ai_count} signals)")
+        return (int(final_auth), "AI-GENERATED", f"Consensus AI detection ({strong_ai_count} signals)", effective_scores)
     
     if final_auth <= 45 and strong_ai_count >= 3:
-        return (int(final_auth), "AI-GENERATED", f"Strong AI consensus ({strong_ai_count} signals)")
+        return (int(final_auth), "AI-GENERATED", f"Strong AI consensus ({strong_ai_count} signals)", effective_scores)
+
+    # Gap filler: Low score but insufficient signal consensus for full AI verdict
+    if final_auth <= 40 and strong_ai_count >= 1:
+        return (int(final_auth), "EDITED", "Strong AI signal found but lacks multi-layer consensus", effective_scores)
     
     # Conflicting signals
     if 35 < final_auth < 60 and strong_ai_count > 0 and strong_real_count > 0:
-        return (int(final_auth), "EDITED", "Conflicting forensic signals")
+        return (int(final_auth), "EDITED", "Conflicting forensic signals", effective_scores)
     
     # Single AI signal without corroboration
     if strong_ai_count == 1 and strong_real_count == 0:
-        return (int(final_auth), "EDITED", "Single AI indicator needs corroboration")
+        return (int(final_auth), "EDITED", "Single AI indicator needs corroboration", effective_scores)
     
     # Weak signals: use count as tie-breaker
     if strong_ai_count > strong_real_count:
-        return (int(final_auth), "EDITED", "Slight AI lean but insufficient evidence")
+        return (int(final_auth), "EDITED", "Slight AI lean but insufficient evidence", effective_scores)
     elif strong_real_count > strong_ai_count:
-        return (int(final_auth), "REAL", "More real indicators than AI")
+        return (int(final_auth), "REAL", "More real indicators than AI", effective_scores)
     
-    return (int(final_auth), "EDITED", "Insufficient forensic evidence")
+    return (int(final_auth), "EDITED", "Insufficient forensic evidence", effective_scores)
 
 
 if __name__ == "__main__":
@@ -873,7 +885,7 @@ if __name__ == "__main__":
     # ... add other mock or real layer outputs as needed ...
 
     # Call Layer 5 with Vision Agent results
-    final_score, verdict, description = calculate_integrity(
+    final_score, verdict, description, effective_scores = calculate_integrity(
         c2pa_res={},
         meta_score=0,
         physics_score=0,
@@ -904,4 +916,5 @@ if __name__ == "__main__":
 
     print(f"\nFINAL VERDICT: {verdict} ({final_score}/100)")
     print(f"Explanation: {description}")
+    print(f"Effective Scores: {effective_scores}")
 

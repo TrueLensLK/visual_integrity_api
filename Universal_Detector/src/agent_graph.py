@@ -51,18 +51,20 @@ def run_tools_node(state: ForensicState):
 
 def layer_5_node(state: ForensicState):
     print("[Node: Layer 5] Calculating baseline rule scores...")
-    score, verdict, desc = layer_5_judge.calculate_integrity(
+    score, verdict, desc, effective_scores = layer_5_judge.calculate_integrity(
         prnu_score=state["layer_scores"].get("prnu", 0),
         visual_score=state["layer_scores"].get("neural_network", 0),
-        vlm_visual_score=state["vision_report"].get("visual_score", 0),
-        vlm_visual_confidence=state["vision_report"].get("confidence", 1.0),
-        vlm_visual_uncertain=state["vision_report"].get("visual_uncertain", False),
+        # vlm_visual_score removed - not in signature
+        visual_confidence=state["vision_report"].get("confidence", 1.0),
+        visual_uncertain=state["vision_report"].get("visual_uncertain", False),
         c2pa_res={}, face_score=0, eye_score=0, meta_score=0, physics_score=0,
-        watermark_score=0, watermark_desc="", context_score=0, context_details={}
+        watermark_score=0, watermark_desc="", context_score=0, context_details={},
+        spectrum_score=0 # Added missing required argument
     )
     state["rule_score"] = score
     state["rule_verdict"] = verdict
     state["rule_desc"] = desc
+    state["effective_scores"] = effective_scores
     return state
 
 def case_builder_node(state: ForensicState):
@@ -74,7 +76,8 @@ def case_builder_node(state: ForensicState):
         rule_based_verdict=state["rule_verdict"],
         rule_based_score=state["rule_score"],
         rule_based_description=state["rule_desc"],
-        visual_confidence=state["vision_report"].get("confidence", 1.0)
+        visual_confidence=state["vision_report"].get("confidence", 1.0),
+        effective_scores=state.get("effective_scores", {})
     )
     return state
 

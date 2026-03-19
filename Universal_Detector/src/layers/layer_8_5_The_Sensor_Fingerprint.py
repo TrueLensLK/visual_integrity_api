@@ -1098,7 +1098,7 @@ def analyze_prnu_integrity(noise_residual: np.ndarray,
 # PUBLIC API
 # ============================================================================
 
-def get_prnu_score(file_path: str, use_flat_masking: bool = True) -> Tuple[float, str]:
+def get_prnu_score(file_path: str, use_flat_masking: bool = True) -> Tuple[float, str, Dict]:
     """
     Main PRNU analysis with false positive reduction.
     
@@ -1107,7 +1107,7 @@ def get_prnu_score(file_path: str, use_flat_masking: bool = True) -> Tuple[float
         use_flat_masking: Enable FP-1 flat-region masking (recommended)
     
     Returns:
-        (score, description)
+        (score, description, details)
     """
     try:
         print(f"   [PRNU v3.0] Starting analysis...")
@@ -1128,16 +1128,16 @@ def get_prnu_score(file_path: str, use_flat_masking: bool = True) -> Tuple[float
         )
         
         print(f"   [PRNU] Score: {score:+.0f} | {desc}")
-        return score, desc
+        return score, desc, details
 
     except Exception as e:
         print(f"   [PRNU Error] {e}")
         import traceback
         traceback.print_exc()
-        return 0, f"PRNU analysis failed: {str(e)}"
+        return 0, f"PRNU analysis failed: {str(e)}", {}
 
 
-def analyze_prnu(image_path: str, is_jpeg_hint: bool = False) -> Tuple[float, str]:
+def analyze_prnu(image_path: str, is_jpeg_hint: bool = False) -> Tuple[float, str, Dict]:
     """Wrapper for compatibility."""
     return get_prnu_score(image_path)
 

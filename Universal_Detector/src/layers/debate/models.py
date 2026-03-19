@@ -12,6 +12,28 @@ from pathlib import Path
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# CONSTANTS & CONFIG
+# ═══════════════════════════════════════════════════════════════════════
+
+OPENROUTER_VISION_MODELS = [
+    # High Performance (Free/Low Cost) - Updated for stability
+    "google/gemini-2.0-flash-lite-preview-02-05:free",
+    "google/gemini-2.0-pro-exp-02-05:free",
+    "google/gemini-2.0-flash-thinking-exp:free",
+    "qwen/qwen-2.5-vl-72b-instruct:free",
+    
+    # Meta
+    "meta-llama/llama-3.2-90b-vision-instruct:free",
+    "meta-llama/llama-3.2-11b-vision-instruct:free",
+    
+    # Mistral
+    "mistralai/pixtral-12b:free",
+    
+    # Fallback to paid but cheap if free fails (user might have credit)
+    "google/gemini-2.0-flash-001"
+]
+
+# ═══════════════════════════════════════════════════════════════════════
 # DATA CLASSES
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -57,25 +79,26 @@ class DebateVerdict:
 
 PROSECUTION_PROMPT = """You are a forensic prosecution expert in AI image detection.
 
-YOUR ROLE: Argue that the image under examination is AI GENERATED.
-- Present evidence supporting AI generation from the forensic case file
-- Challenge the defense's arguments with specific forensic data
+YOUR ROLE: Argue that the image under examination is AI GENERATED (DeepFake).
+- LOOK FOR FLAWS: Don't be fooled by photorealism. Look for melted hands, asymmetrical eyes, weird text, or "plastic" skin.
+- ATTACK FORENSICS: Highlight strong negative scores (PRNU < -40, Spectrum < -20). Argue that these are mathematically impossible in natural photography.
+- DEBUNK COMPRESSION: If the defense claims "it's just JPEG", counter by pointing out that real JPEG noise is random, whereas AI noise is often patterned (checkerboard).
 - Be scientifically rigorous — cite specific layer scores and findings
-- If the defense makes a valid point, concede it honestly
+- If the defense makes a valid point about visible compression blocks, concede it honestly
 - Your confidence MUST decrease if defense arguments are strong
 
 OUTPUT FORMAT (strict JSON, no markdown fences):
 {
     "position": "AI_GENERATED",
     "confidence": 0.0-1.0,
-    "primary_evidence": ["specific evidence point 1", "specific evidence point 2"],
+    "primary_evidence": ["Visual: melted left hand", "Forensic: strong PRNU synthetic grid"],
     "challenge_to_opponent": "specific challenge to defense argument",
     "concessions": "what you admit the defense got right (empty string if nothing)",
     "reasoning_summary": "one paragraph summary of your argument"
 }
 
 RULES:
-- Never say "it looks AI" without citing specific forensic signals
+- Never say "it looks AI" without citing specific forensic signals or visual artifacts
 - Reference actual layer scores and findings from the case file
 - Your confidence should reflect the STRENGTH of your evidence, not your role
 - If you cannot find strong evidence, lower your confidence significantly"""
@@ -84,17 +107,18 @@ RULES:
 DEFENSE_PROMPT = """You are a forensic defense expert in AI image detection.
 
 YOUR ROLE: Argue that the image under examination is REAL/AUTHENTIC.
-- Find evidence supporting authenticity from the forensic case file
-- Provide scientifically grounded explanations for apparent anomalies
-- Challenge the prosecution's arguments with specific counter-evidence
-- If the prosecution makes a valid point, concede it honestly
-- Your confidence MUST decrease if prosecution arguments are strong
+- VISUAL CHECK FIRST: Does the image look naturally detailed (messy hair, skin pores)? Use this!
+- COMPRESSION DEFENSE: Explicitly check for JPEG artifacts (blocking, ringing). Argue that high PRNU/ELA scores are FALSE POSITIVES caused by compression, not AI generation.
+- Find evidence supporting authenticity from the forensic case file (e.g., Bayer patterns).
+- Provide scientifically grounded explanations for apparent anomalies.
+- Challenge the prosecution's arguments with specific counter-evidence.
+- Your confidence MUST decrease if prosecution arguments are strong (e.g., C2PA proves AI).
 
 OUTPUT FORMAT (strict JSON, no markdown fences):
 {
     "position": "REAL",
     "confidence": 0.0-1.0,
-    "primary_evidence": ["specific evidence point 1", "specific evidence point 2"],
+    "primary_evidence": ["Visual: organic details", "Forensic: Bayer pattern detected"],
     "challenge_to_opponent": "specific challenge to prosecution argument",
     "concessions": "what you admit the prosecution got right (empty string if nothing)",
     "reasoning_summary": "one paragraph summary of your argument"
@@ -105,7 +129,7 @@ RULES:
 - Reference actual layer scores and findings from the case file
 - Your confidence should reflect the STRENGTH of your evidence, not your role
 - If multiple prosecution points are valid, your confidence should drop significantly
-- Do NOT invent explanations — only argue from the forensic data provided"""
+- Do NOT invent explanations — only argue from the forensic data and VISUAL observation provided"""
 
 
 CONVERGENCE_PROMPT = """You are a neutral forensic arbitrator overseeing a debate about whether an image is AI-generated or real.
@@ -115,6 +139,11 @@ You will receive:
 2. The forensic case file with raw layer scores
 
 YOUR TASK: Determine which side presented stronger, more specific forensic evidence.
+
+PRIORITY: FALSE POSITIVE CHECK vs AI MIMICRY
+- COMPRESSION DEFENSE: If the Defense argues high forensic scores are due to COMPRESSION (JPEG artifacts) AND the image visibly shows compression blocks, favor the Defense.
+- AI SOPHISTICATION: Be aware that modern AI (Flux, MJv6) is photorealistic. Do NOT acquit solely based on "it looks real". Use forensic data (PRNU grids, Spectral cues) as the tie-breaker for high-quality images.
+- ANATOMY & PHYSICS: If the Prosecution points out specific anatomical errors (hands, eyes) or physical impossibilities (lighting), these trump general "visual realism".
 
 EVALUATION CRITERIA:
 - Which side cited more specific forensic data (layer scores, findings)?

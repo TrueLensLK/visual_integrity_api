@@ -17,7 +17,7 @@ from Universal_Detector.src.layers.forensic_case_builder import compile_case_fil
 from Universal_Detector.src.layers.llm_judge import HybridJudge
 # --- CONFIGURATION ---
 DATASET_PATH = "validation_dataset"
-ENABLE_LLM = True  # Set to True to test the full "Final Boss" pipeline
+ENABLE_LLM = False  # Set to True to test the full "Final Boss" pipeline
 
 def run_validation():
     print("STARTING VALIDATION RUN...")
@@ -155,17 +155,19 @@ def run_validation():
             except Exception:
                 layer_scores["watermark"] = 0
 
+            prnu_details_dict = {}
             try:
-                prnu_score, prnu_desc = analyze_prnu(image_path, is_jpeg_hint=is_jpeg)
+                prnu_score, prnu_desc, prnu_details_dict = analyze_prnu(image_path, is_jpeg_hint=is_jpeg)
                 layer_scores["prnu"] = prnu_score
                 layer_details["prnu"] = prnu_desc
             except Exception:
                 layer_scores["prnu"] = 0
 
+            context_data_dict = {}
             try:
-                c_score, c_det = analyze_context(image_path)
+                c_score, context_data_dict = analyze_context(image_path)
                 layer_scores["context"] = c_score
-                layer_details["context"] = c_det.get("note", "")
+                layer_details["context"] = context_data_dict.get("note", "")
             except Exception:
                 layer_scores["context"] = 0
 
@@ -192,7 +194,7 @@ def run_validation():
 
             # --- LAYER 5: MASTER JUDGE (Rule-Based) ---
             print(f"[DEBUG] {filename} layer_scores: {layer_scores}")
-            final_score, verdict, description = calculate_integrity(
+            final_score, verdict, description, effective_scores = calculate_integrity(
                 c2pa_res=c2pa_result,
                 meta_score=layer_scores.get("metadata", 0),
                 physics_score=layer_scores.get("physics", 0),
@@ -203,8 +205,9 @@ def run_validation():
                 watermark_score=layer_scores.get("watermark", 0),
                 watermark_desc=layer_details.get("watermark", ""),
                 prnu_score=layer_scores.get("prnu", 0),
+                prnu_details=prnu_details_dict,
                 context_score=layer_scores.get("context", 0),
-                context_details={"note": layer_details.get("context", "")},
+                context_details=context_data_dict,
                 shadow_score=layer_scores.get("shadow", 0),
                 shadow_desc=layer_details.get("shadow", ""),
                 artifact_score=layer_scores.get("artifacts", 0),
@@ -237,7 +240,8 @@ def run_validation():
                 model_consensus=model_consensus,
                 model_real_votes=model_real_votes,
                 model_ai_votes=model_ai_votes,
-                warnings=[]
+                warnings=[],
+                effective_scores=effective_scores
             )
 
             # --- Run Final Judge (LLM/Hybrid) ---

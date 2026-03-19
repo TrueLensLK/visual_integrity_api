@@ -11,6 +11,7 @@ from typing import Optional, List
 from .models import (
     AgentResponse,
     PROSECUTION_PROMPT,
+    OPENROUTER_VISION_MODELS,  # New import
     parse_agent_json,
     format_debate_history,
     encode_image_base64,
@@ -22,8 +23,8 @@ class ProsecutionAgent:
     """
     Argues AI-GENERATED.
 
-    Primary:  Gemini Vision (with retry + backoff for 429 errors)
-    Fallback: OpenRouter Vision (different model from defense)
+    Primary:  Gemini Vision (gemini-2.0-flash - Aggressive, fast)
+    Fallback: OpenRouter Vision (different models)
 
     Round 1: Vision call (sees the actual image + case file)
     Rounds 2-3: Text-only rebuttals (argues from forensic evidence only)
@@ -47,7 +48,7 @@ class ProsecutionAgent:
         try:
             import google.generativeai as genai
             genai.configure(api_key=self._gemini_key)
-            self._model = genai.GenerativeModel("gemini-2.5-flash")
+            self._model = genai.GenerativeModel("gemini-2.0-flash") # Aggressive, fast
         except Exception as e:
             print(f"[Debate/Prosecution] Gemini init failed: {e}")
 
@@ -57,7 +58,7 @@ class ProsecutionAgent:
         try:
             from openai import OpenAI
             self._openrouter_client = OpenAI(
-                api_key=self._openrouter_key,
+                api_key=self._openrouter_key.strip(),
                 base_url="https://openrouter.ai/api/v1"
             )
         except Exception as e:
@@ -79,12 +80,13 @@ class ProsecutionAgent:
                         response = self._model.generate_content([prompt, img])
                         return response.text
                     except Exception as e:
-                        if "429" in str(e) and attempt < self.MAX_RETRIES:
+                        err_msg = str(e).lower()
+                        if ("429" in err_msg or "quota" in err_msg) and attempt < self.MAX_RETRIES:
                             wait = self.RETRY_DELAYS[attempt]
-                            print(f"[Debate/Prosecution] 429 quota hit, retry in {wait}s "
+                            print(f"[Debate/Prosecution] 429/Quota hit, retry in {wait}s "
                                   f"(attempt {attempt+1}/{self.MAX_RETRIES})")
                             time.sleep(wait)
-                        elif "429" in str(e):
+                        elif "429" in err_msg or "quota" in err_msg:
                             print(f"[Debate/Prosecution] Gemini quota exhausted after retries")
                             self._gemini_dead = True
                             return None
@@ -104,12 +106,13 @@ class ProsecutionAgent:
                 response = self._model.generate_content(prompt)
                 return response.text
             except Exception as e:
-                if "429" in str(e) and attempt < self.MAX_RETRIES:
+                err_msg = str(e).lower()
+                if ("429" in err_msg or "quota" in err_msg) and attempt < self.MAX_RETRIES:
                     wait = self.RETRY_DELAYS[attempt]
-                    print(f"[Debate/Prosecution] 429 quota hit, retry in {wait}s "
+                    print(f"[Debate/Prosecution] 429/Quota hit, retry in {wait}s "
                           f"(attempt {attempt+1}/{self.MAX_RETRIES})")
                     time.sleep(wait)
-                elif "429" in str(e):
+                elif "429" in err_msg or "quota" in err_msg:
                     print(f"[Debate/Prosecution] Gemini quota exhausted after retries")
                     self._gemini_dead = True
                     return None
@@ -141,19 +144,55 @@ class ProsecutionAgent:
         user_content.append({"type": "text", "text": user_prompt})
         messages.append({"role": "user", "content": user_content})
 
-        try:
-            # Use Qwen3-VL (different from defense's Nemotron) for epistemic diversity
-            response = self._openrouter_client.chat.completions.create(
-                model="qwen/qwen3-vl-30b-a3b-thinking",
-                messages=messages,
-                temperature=0.1,
-                max_tokens=2048,
-                extra_headers={"HTTP-Referer": "https://deepfake-detection.local"}
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"[Debate/Prosecution] OpenRouter fallback failed: {e}")
-            return None
+        # FALLBACK CHAIN for Prosecution
+        # We can use the same models but maybe prioritize Qwen for prosecution
+        models = OPENROUTER_VISION_MODELS 
+        
+        last_error = None
+        for model in models:
+            try:
+                # print(f"[Debate/Prosecution] Trying OpenRouter model: {model}")
+                try:
+                    # Attempt with JSON mode first
+                    response = self._openrouter_client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=0.1,
+                        max_tokens=2048,
+                        response_format={"type": "json_object"},
+                        extra_headers={"HTTP-Referer": "https://deepfake-detection.local"}
+                    )
+                except Exception as json_err:
+                    if "400" in str(json_err):
+                        # Retry without JSON mode if model doesn't support it
+                        response = self._openrouter_client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            temperature=0.1,
+                            max_tokens=2048,
+                            extra_headers={"HTTP-Referer": "https://deepfake-detection.local"}
+                        )
+                    else:
+                        raise json_err
+
+                if response.choices:
+                    return response.choices[0].message.content
+
+            except Exception as e:
+                err_msg = str(e).lower()
+                if "404" in err_msg or "not found" in err_msg:
+                    print(f"[Debate/Prosecution] Model '{model}' 404 Not Found. Skipping.")
+                elif "400" in err_msg:
+                    print(f"[Debate/Prosecution] Model '{model}' 400 Bad Request. Skipping.")
+                elif "429" in err_msg:
+                    print(f"[Debate/Prosecution] Model '{model}' 429 Rate Limit. Skipping.")
+                else:
+                    print(f"[Debate/Prosecution] Model '{model}' failed: {e}. Skipping.")
+                last_error = e
+                continue
+
+        print(f"[Debate/Prosecution] All OpenRouter models failed. Last error: {last_error}")
+        return None
 
     # ── Public interface ───────────────────────────────────────────
 

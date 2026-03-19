@@ -23,27 +23,131 @@ A multi-layered AI-powered deepfake detection system using various analysis tech
 
 ## Installation
 
-1. Clone the repository
-2. Install dependencies:
+1. Clone the repository and move into it:
 ```bash
-pip install -r Universal_Detector/requirements.txt
+git clone <your-repo-url>
+cd DeepFake_Detection
 ```
+
+2. Create a virtual environment:
+
+Windows (PowerShell):
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+macOS/Linux:
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+3. Install dependencies from the root requirements file:
+```bash
+pip install -r requirements.txt
+```
+
+4. Configure environment variables:
+```bash
+cp .env.example .env
+```
+
+On Windows, if `cp` is not available:
+```powershell
+Copy-Item .env.example .env
+```
+
+Edit `.env` and set at least one LLM provider key:
+- `GOOGLE_AI_API_KEY` (or `GEMINI_API_KEY`)
+- `GROQ_API_KEY`
+- `OPENROUTER_API_KEY`
+
+Keep `ENABLE_LLM_JUDGE=true` to allow LLM-based judging.
 
 ## Usage
 
-Run the FastAPI server:
+Run the FastAPI server from the repository root:
 ```bash
 python -m uvicorn main:app --reload
 ```
 
+Then open:
+- API docs: `http://127.0.0.1:8000/docs`
+- Health endpoint: `http://127.0.0.1:8000/health`
+
+Example API call (PowerShell):
+```powershell
+Invoke-RestMethod -Uri http://127.0.0.1:8000/analyze -Method Post -Form @{
+    file = Get-Item "path\to\image.jpg"
+}
+```
+
+Example API call (curl):
+```bash
+curl -X POST "http://127.0.0.1:8000/analyze" -F "file=@path/to/image.jpg"
+```
+
+## Docker
+
+You can run this API in Docker without installing Python locally.
+
+1. Create `.env` from template and set your API keys:
+```bash
+cp .env.example .env
+```
+
+2. Build image:
+```bash
+docker build -t deepfake-detection:latest .
+```
+
+3. Run container:
+```bash
+docker run --rm -p 8000:8000 --env-file .env --name deepfake-api deepfake-detection:latest
+```
+
+4. Open:
+- API docs: `http://127.0.0.1:8000/docs`
+- Health endpoint: `http://127.0.0.1:8000/health`
+
+Docker Compose alternative:
+```bash
+docker compose up --build
+```
+
+Stop Compose:
+```bash
+docker compose down
+```
+
+Notes:
+- First run can be slow because Python ML/CV dependencies are heavy.
+- LLM features require valid keys in `.env`.
+- If port `8000` is busy, map another host port (for example `-p 8001:8000`).
+
 Optional: configure AI metadata keywords (comma-separated) used by Layer 2:
+
+Windows (PowerShell):
+```powershell
+$env:AI_METADATA_KEYWORDS="midjourney,stable diffusion,openai,firefly"
+```
+
+Windows (cmd):
 ```bash
 set AI_METADATA_KEYWORDS=midjourney,stable diffusion,openai,firefly
 ```
 
-You can also copy .env.example to .env and set the value there.
+macOS/Linux:
+```bash
+export AI_METADATA_KEYWORDS="midjourney,stable diffusion,openai,firefly"
+```
 
-Access the API documentation at: `http://127.0.0.1:8000/docs`
+## LLM Notes
+
+- LLM is not called for every image.
+- The system uses LLM mainly for ambiguous or contradictory cases.
+- If no valid key is available, the app falls back to rule-based judging.
 
 ## API Endpoint
 
@@ -56,9 +160,10 @@ Access the API documentation at: `http://127.0.0.1:8000/docs`
 ```
 DeepFake_Detection/
 ├── main.py                          # FastAPI application entry point
+├── requirements.txt                 # Python dependencies (install from this file)
+├── .env.example                     # Environment variable template
 ├── temp_uploads/                    # Temporary upload directory
 └── Universal_Detector/
-    ├── requirements.txt
     └── src/
         └── layers/
             ├── layer_2_metadata.py      # Metadata analysis
@@ -87,6 +192,23 @@ DeepFake_Detection/
 - MediaPipe
 - Pillow
 - NumPy
+
+## Troubleshooting
+
+1. `LLM not working`
+- Ensure `.env` exists in the project root.
+- Ensure at least one API key is set and valid.
+- Ensure `ENABLE_LLM_JUDGE=true`.
+- Check terminal logs for provider errors like missing key, quota, or auth failures.
+
+2. `Module/import errors`
+- Confirm you installed from `requirements.txt` in the repository root.
+- Confirm your virtual environment is activated before running `uvicorn`.
+
+3. `Port already in use`
+```bash
+python -m uvicorn main:app --reload --port 8001
+```
 
 ## License
 
