@@ -59,7 +59,7 @@ try:
        from Universal_Detector.src.layers.layer_3_physics import analyze_physics
        from Universal_Detector.src.layers.layer_3_5_face import analyze_face_consistency
        from Universal_Detector.src.layers.layer_4_visual import predict_visuals_detailed
-       from Universal_Detector.src.layers.layer_5_judge import calculate_integrity
+       from Universal_Detector.src.layers.layer_5_judge import calculate_integrity, humanize_verdict_description
        from Universal_Detector.src.layers.layer_6_spectrum import analyze_spectrum
        from Universal_Detector.src.layers.layer_7_eyes import analyze_eyes
        from Universal_Detector.src.layers.layer_8_watermark import detect_watermarks
@@ -414,11 +414,14 @@ class AIImageDetector:
 
         self.log(f"FINAL: {verdict} ({final_score}/100) - {judge_source}", "SUCCESS")
         
+        # Convert technical description to user-friendly language
+        friendly_description = humanize_verdict_description(verdict, description, final_score)
+
         return DetectionResult(
             final_score=final_score,
             verdict=verdict,
             confidence=confidence,
-            description=description,
+            description=friendly_description,
             layer_scores=layer_scores,
             layer_details=layer_details,
             processing_time_ms=processing_time,
