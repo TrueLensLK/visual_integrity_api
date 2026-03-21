@@ -26,6 +26,7 @@ FINAL BOSS (LLM + Adversarial Debate):
       judged by Convergence Detector (Groq text), max 3 rounds
 """
 
+import io
 import os
 import sys
 import shutil
@@ -35,12 +36,16 @@ import numpy as np
 from typing import Dict, Tuple, Optional, Any
 from dataclasses import dataclass, asdict
 from datetime import datetime
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 load_dotenv()  # Load .env file for API keys
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, HttpUrl, field_validator
+import httpx
+import requests
 
 # --- PATH CONFIGURATION ---
 # Add layers directory to Python path
@@ -54,7 +59,7 @@ try:
        from Universal_Detector.src.layers.layer_3_physics import analyze_physics
        from Universal_Detector.src.layers.layer_3_5_face import analyze_face_consistency
        from Universal_Detector.src.layers.layer_4_visual import predict_visuals_detailed
-       from Universal_Detector.src.layers.layer_5_judge import calculate_integrity
+       from Universal_Detector.src.layers.layer_5_judge import calculate_integrity, humanize_verdict_description
        from Universal_Detector.src.layers.layer_6_spectrum import analyze_spectrum
        from Universal_Detector.src.layers.layer_7_eyes import analyze_eyes
        from Universal_Detector.src.layers.layer_8_watermark import detect_watermarks
@@ -544,6 +549,9 @@ class AIImageDetector:
 
         self.log(f"FINAL: {verdict} ({final_score}/100) - {judge_source}", "SUCCESS")
         
+        # Convert technical description to user-friendly language
+        friendly_description = humanize_verdict_description(verdict, description, final_score)
+
         return DetectionResult(
             final_score=final_score,
             verdict=verdict,
@@ -613,6 +621,61 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and "uvicorn" not in sys.argv[0]:
         main()
 
+# ===========================================================================
+# /extract-phash bootstrap  –  must be defined before FastAPI app creation
+# ===========================================================================
+from contextlib import asynccontextmanager
+
+from Universal_Detector.src.layers.phash_extractor import (
+    extract_phash as _run_extract_phash,
+    PhashResult,
+    PHASH_MAX_BYTES as _PHASH_MAX_BYTES,
+)
+
+# Module-level HTTP client singleton.
+# Re-using a single AsyncClient across requests avoids per-request TCP
+# handshake and TLS negotiation overhead — critical for a fast-path endpoint.
+_http_client: httpx.AsyncClient | None = None
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    """Open / close the shared httpx client around the app lifetime."""
+    global _http_client
+
+    # Configure timeouts explicitly for different phases:
+    # - connect: time to establish TCP connection (including DNS)
+    # - read: time to receive data chunks
+    # - write: time to send request
+    # - pool: time to acquire a connection from pool
+    timeout_config = httpx.Timeout(
+        connect=10.0,    # 10s for DNS + TCP handshake
+        read=30.0,       # 30s for reading response (large images)
+        write=10.0,      # 10s for sending request
+        pool=5.0,        # 5s to acquire connection from pool
+    )
+
+    # Connection limits tuned for high-throughput:
+    # - max_connections: total concurrent connections
+    # - max_keepalive_connections: kept warm for reuse
+    # - keepalive_expiry: how long to keep idle connections
+    limits_config = httpx.Limits(
+        max_connections=200,
+        max_keepalive_connections=50,
+        keepalive_expiry=30.0,
+    )
+
+    _http_client = httpx.AsyncClient(
+        follow_redirects=True,
+        timeout=timeout_config,
+        limits=limits_config,
+        http2=True,  # Enable HTTP/2 for better multiplexing
+    )
+    yield
+    await _http_client.aclose()
+    _http_client = None
+
+
 # --- FastAPI App ---
 app = FastAPI(title="AI Image Detection v6.0")
 
@@ -621,7 +684,7 @@ app = FastAPI(title="AI Image Detection v6.0")
 async def check_api_health():
     """Verify primary models and fallbacks on startup."""
     print("\n[Startup] Checking Model Health...")
-    
+
     # Check Gemini
     gemini_key = os.getenv("GOOGLE_AI_API_KEY") or os.getenv("GEMINI_API_KEY")
     if gemini_key:
@@ -636,13 +699,13 @@ async def check_api_health():
         print(f"   Configured Fallback Chain ({len(OPENROUTER_VISION_MODELS)} models):")
         for i, model in enumerate(OPENROUTER_VISION_MODELS):
             print(f"   {i+1}. {model}")
-        
+
         # Simple connectivity check
         print("   Checking OpenRouter connectivity...")
         import requests
         try:
-            resp = requests.get("https://openrouter.ai/api/v1/auth/key", 
-                              headers={"Authorization": f"Bearer {openrouter_key}"}, 
+            resp = requests.get("https://openrouter.ai/api/v1/auth/key",
+                              headers={"Authorization": f"Bearer {openrouter_key}"},
                               timeout=2)  # Ultra-short timeout to prevent startup hang
             if resp.status_code == 200:
                 print("   OpenRouter Connectivity: OK")
@@ -678,3 +741,353 @@ async def api_analyze(file: UploadFile = File(...)):
 
 @app.get("/health")
 def health(): return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# Request model for the URL-based analysis endpoint
+# ---------------------------------------------------------------------------
+_ALLOWED_IMAGE_CONTENT_TYPES = {
+    "image/jpeg", "image/png",
+}
+_MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024  # 20 MB hard limit
+_DOWNLOAD_TIMEOUT_SECONDS = 15
+
+
+class AnalyzeUrlRequest(BaseModel):
+    s3_url: HttpUrl  # Changed from 'url' to 's3_url' for consistency with /extract-phash
+
+    @field_validator("s3_url")
+    @classmethod
+    def must_be_http_or_https(cls, v: HttpUrl) -> HttpUrl:
+        if v.scheme not in ("http", "https"):
+            raise ValueError("Only http/https URLs are supported.")
+        return v
+
+
+@app.post("/analyze-url")
+async def api_analyze_url(body: AnalyzeUrlRequest):
+    """
+    Download an image from the provided URL and run the same multi-layer
+    forensic analysis as the /analyze endpoint.
+
+    - Validates that the URL is http/https.
+    - Streams the response to check Content-Type and enforce a size limit
+      before writing to disk (avoids downloading huge/non-image payloads).
+    - Cleans up the temporary file regardless of success or failure.
+    """
+    url_str = str(body.s3_url)  # Changed from body.url to body.s3_url
+
+    # Derive a safe file extension from the URL path (fallback to .jpg)
+    url_path = urlparse(url_str).path
+    _, ext = os.path.splitext(url_path)
+    ext = ext.lower() if ext.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif", ".tiff") else ".jpg"
+
+    temp_path = os.path.join("temp_uploads", f"{uuid.uuid4().hex}{ext}")
+    os.makedirs("temp_uploads", exist_ok=True)
+
+    try:
+        # Stream the download so we can validate headers before buffering the body
+        with requests.get(url_str, stream=True, timeout=_DOWNLOAD_TIMEOUT_SECONDS,
+                          allow_redirects=True) as response:
+
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Failed to download image: HTTP {response.status_code} from remote server."
+                )
+
+            # Validate Content-Type header
+            content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            if content_type not in _ALLOWED_IMAGE_CONTENT_TYPES:
+                raise HTTPException(
+                    status_code=415,
+                    detail=f"Remote URL does not point to a supported image. "
+                           f"Content-Type received: '{content_type}'."
+                )
+
+            # Stream to disk while enforcing the size limit
+            downloaded = 0
+            with open(temp_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=65536):
+                    downloaded += len(chunk)
+                    if downloaded > _MAX_IMAGE_SIZE_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Remote image exceeds the maximum allowed size of "
+                                   f"{_MAX_IMAGE_SIZE_BYTES // (1024 * 1024)} MB."
+                        )
+                    f.write(chunk)
+
+        if downloaded == 0:
+            raise HTTPException(status_code=400, detail="Downloaded file is empty.")
+
+        result = api_detector.analyze_image(temp_path)
+        return _sanitize(asdict(result))
+
+    except HTTPException:
+        raise  # Re-raise FastAPI HTTP exceptions as-is
+    except requests.exceptions.Timeout:
+        raise HTTPException(
+            status_code=504,
+            detail=f"Request timed out while downloading image from the provided URL "
+                   f"(limit: {_DOWNLOAD_TIMEOUT_SECONDS}s)."
+        )
+    except requests.exceptions.ConnectionError as e:
+        raise HTTPException(status_code=502, detail=f"Could not connect to remote server: {e}")
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=400, detail=f"Error downloading image: {e}")
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+
+# ===========================================================================
+# /extract-phash  –  High-throughput perceptual hash endpoint
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Request / response models
+# ---------------------------------------------------------------------------
+class ExtractPhashRequest(BaseModel):
+    """Payload for the /extract-phash endpoint."""
+
+    s3_url: str  # Pre-signed or public S3 URL (http/https)
+
+    @field_validator("s3_url")
+    @classmethod
+    def _validate_url_scheme(cls, v: str) -> str:
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError("s3_url must use http or https scheme.")
+        if not parsed.netloc:
+            raise ValueError("s3_url must be a fully qualified URL.")
+        return v
+
+
+class ExtractPhashResponse(BaseModel):
+    """Hashes for the original and the horizontally mirrored image."""
+
+    original_hash: str    # Binary string, e.g. "10110010…"
+    mirrored_hash: str    # Binary string of the FLIP_LEFT_RIGHT variant
+    hash_algorithm: str   # "pdq" | "phash"
+    hash_bits: int        # Length of each binary string
+    border_stripped: bool # Whether a uniform border was detected and removed
+
+
+# ---------------------------------------------------------------------------
+# Endpoint
+# ---------------------------------------------------------------------------
+@app.post("/extract-phash", response_model=ExtractPhashResponse)
+async def extract_phash_endpoint(body: ExtractPhashRequest) -> ExtractPhashResponse:
+    """
+    High-throughput perceptual hash extraction endpoint.
+
+    Downloads an image from *s3_url* entirely in memory (no disk I/O),
+    applies forensic pre-processing mitigations (border stripping, mirror defense),
+    and returns PDQ/pHash hex strings.
+
+    Optimizations:
+    - Connection pooling with HTTP/2 multiplexing
+    - Streaming download with size limits
+    - CPU-bound hashing offloaded to thread pool
+    - Comprehensive error handling with retry hints
+
+    Returns:
+        - **original_hash** – hash of the border-stripped image (hex)
+        - **mirrored_hash** – hash of the horizontally flipped variant (hex)
+    """
+    import asyncio
+    import logging
+
+    logger = logging.getLogger("extract-phash")
+
+    # Validate client is ready
+    if _http_client is None:
+        logger.error("HTTP client not initialized - lifespan event may have failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Service temporarily unavailable: HTTP client not initialized. Please retry.",
+        )
+
+    url_str = str(body.s3_url)
+
+    # ------------------------------------------------------------------
+    # 1. Async stream download into memory (no disk I/O)
+    # ------------------------------------------------------------------
+    buf = io.BytesIO()
+    downloaded = 0
+
+    # Retry configuration for transient failures
+    max_retries = 2
+    retry_delay = 0.5  # seconds
+    last_error: Exception | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            buf.seek(0)
+            buf.truncate(0)
+            downloaded = 0
+
+            async with _http_client.stream("GET", url_str) as response:
+                # Check HTTP status
+                if response.status_code == 404:
+                    raise HTTPException(
+                        status_code=404,
+                        detail="Image not found at the provided URL.",
+                    )
+                if response.status_code == 403:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Access denied. The signed URL may have expired.",
+                    )
+                if response.status_code >= 500:
+                    # Server error - worth retrying
+                    raise httpx.HTTPStatusError(
+                        f"Upstream server error: {response.status_code}",
+                        request=response.request,
+                        response=response,
+                    )
+                if response.status_code != 200:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Failed to download image: HTTP {response.status_code}.",
+                    )
+
+                # Validate content type (but be lenient - S3 sometimes returns generic types)
+                content_type = (
+                    response.headers.get("content-type", "")
+                    .split(";")[0]
+                    .strip()
+                    .lower()
+                )
+                # Allow: image/*, application/octet-stream, or empty (S3 pre-signed URLs)
+                if content_type and not (
+                    content_type.startswith("image/") or
+                    content_type == "application/octet-stream" or
+                    content_type == "binary/octet-stream"
+                ):
+                    raise HTTPException(
+                        status_code=415,
+                        detail=f"URL does not point to a supported image. "
+                               f"Content-Type received: '{content_type}'.",
+                    )
+
+                # Stream chunks with size limit
+                async for chunk in response.aiter_bytes(chunk_size=65536):
+                    downloaded += len(chunk)
+                    if downloaded > _PHASH_MAX_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"Image exceeds the "
+                                   f"{_PHASH_MAX_BYTES // (1024 * 1024)} MB limit.",
+                        )
+                    buf.write(chunk)
+
+            # Success - break out of retry loop
+            last_error = None
+            break
+
+        except HTTPException:
+            # Don't retry client errors (4xx)
+            raise
+        except httpx.TimeoutException as exc:
+            last_error = exc
+            logger.warning(f"Timeout on attempt {attempt + 1}/{max_retries + 1}: {exc}")
+            if attempt < max_retries:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+        except httpx.ConnectError as exc:
+            # DNS resolution failures, connection refused, etc.
+            last_error = exc
+            error_msg = str(exc)
+            logger.warning(f"Connection error on attempt {attempt + 1}/{max_retries + 1}: {error_msg}")
+
+            # Check for DNS-specific errors
+            if "name resolution" in error_msg.lower() or "getaddrinfo" in error_msg.lower():
+                if attempt < max_retries:
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    continue
+                raise HTTPException(
+                    status_code=502,
+                    detail="DNS resolution failed. The service may be experiencing network issues. Please retry.",
+                )
+
+            if attempt < max_retries:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+        except httpx.HTTPStatusError as exc:
+            last_error = exc
+            logger.warning(f"HTTP error on attempt {attempt + 1}/{max_retries + 1}: {exc}")
+            if attempt < max_retries:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+        except httpx.RequestError as exc:
+            last_error = exc
+            logger.warning(f"Request error on attempt {attempt + 1}/{max_retries + 1}: {exc}")
+            if attempt < max_retries:
+                await asyncio.sleep(retry_delay * (attempt + 1))
+                continue
+
+    # If we exhausted retries, raise the last error
+    if last_error is not None:
+        if isinstance(last_error, httpx.TimeoutException):
+            raise HTTPException(
+                status_code=504,
+                detail="Request timed out after multiple attempts. The image server may be slow or unreachable.",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Network error after {max_retries + 1} attempts: {last_error}",
+        )
+
+    if downloaded == 0:
+        raise HTTPException(status_code=400, detail="Downloaded file is empty.")
+
+    # ------------------------------------------------------------------
+    # 2. Run CPU-bound hash extraction in thread pool
+    #    This prevents blocking the async event loop during image
+    #    decoding and hash computation.
+    # ------------------------------------------------------------------
+    try:
+        # Get the buffer as bytes (memoryview doesn't work across threads)
+        image_bytes = buf.getvalue()
+
+        # Run in thread pool to avoid blocking the event loop
+        loop = asyncio.get_running_loop()
+        result: PhashResult = await loop.run_in_executor(
+            None,  # Use default thread pool
+            _run_extract_phash,
+            image_bytes,
+        )
+    except ValueError as exc:
+        logger.warning(f"Image processing failed: {exc}")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unable to process image: {exc}",
+        )
+    except RuntimeError as exc:
+        logger.error(f"Hash library error: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"Hash computation unavailable: {exc}",
+        )
+    except Exception as exc:
+        logger.exception(f"Unexpected error during hash extraction: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error during image processing. Please retry.",
+        )
+    finally:
+        # Explicitly clear the buffer to free memory
+        buf.close()
+
+    return ExtractPhashResponse(
+        original_hash=result.original_hash,
+        mirrored_hash=result.mirrored_hash,
+        hash_algorithm=result.hash_algorithm,
+        hash_bits=result.hash_bits,
+        border_stripped=result.border_stripped,
+    )
+
