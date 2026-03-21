@@ -1,8 +1,175 @@
 """
-Layer 5: Master Judge 
+Layer 5: Master Judge
 """
 
 from typing import Tuple, Dict
+
+# ============================================================================
+# USER-FRIENDLY DESCRIPTION GENERATOR
+# ============================================================================
+def _humanize_description(verdict: str, technical_desc: str, final_score: int) -> str:
+    """
+    Converts technical forensic descriptions into user-friendly language.
+
+    Args:
+        verdict: The verdict (REAL, AI-GENERATED, EDITED, etc.)
+        technical_desc: The technical description from the analysis
+        final_score: The authenticity score (0-100)
+
+    Returns:
+        A simple, non-technical description anyone can understand
+    """
+
+    # Base templates for each verdict type
+    verdict_templates = {
+        "REAL": {
+            "high": "This image appears to be a genuine photograph taken with a camera.",
+            "medium": "This image looks like a real photograph, though some quality is lost.",
+            "low": "This image is likely a real photograph, but we couldn't verify all details."
+        },
+        "AI-GENERATED": {
+            "high": "This image was likely created by artificial intelligence.",
+            "medium": "This image shows signs of being AI-generated.",
+            "low": "This image may have been created by AI, but we're not entirely certain."
+        },
+        "EDITED": {
+            "default": "This image appears to be a real photograph that has been edited or modified."
+        },
+        "EDITED_REAL": {
+            "default": "This is a real photograph that has been digitally enhanced or edited."
+        },
+        "AI-ENHANCED": {
+            "default": "This appears to be a real photograph that has been enhanced using AI tools."
+        },
+        "LIKELY_REAL": {
+            "default": "This image appears to be an authentic photograph."
+        },
+        "AMBIGUOUS_REQUIRES_AGENT": {
+            "default": "This image requires additional analysis to determine its authenticity."
+        },
+        "ERROR": {
+            "default": "We couldn't complete the analysis due to a technical issue."
+        }
+    }
+
+    # Determine confidence level from score
+    if final_score >= 75 or final_score <= 25:
+        confidence = "high"
+    elif final_score >= 60 or final_score <= 40:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    # Get base description
+    templates = verdict_templates.get(verdict, {"default": "Unable to determine the authenticity of this image."})
+
+    if "default" in templates:
+        base_desc = templates["default"]
+    else:
+        base_desc = templates.get(confidence, templates.get("medium", ""))
+
+    # Add context based on technical description keywords
+    context_additions = []
+
+    tech_lower = technical_desc.lower()
+
+    # C2PA (digital signature)
+    if "c2pa" in tech_lower:
+        if "verified" in tech_lower or "confirms" in tech_lower:
+            if "ai" in tech_lower:
+                return "This image has a verified digital signature confirming it was created with AI tools."
+            else:
+                return "This image has a verified digital signature from the original camera."
+        elif "tampered" in tech_lower:
+            return "This image's digital signature shows it has been tampered with."
+
+    # Deepfake detection
+    if "deepfake" in tech_lower:
+        return "This image appears to contain a face that was digitally altered or generated."
+
+    # Sensor/Camera detection
+    if "sensor" in tech_lower and ("dna" in tech_lower or "verified" in tech_lower):
+        context_additions.append("Our analysis detected authentic camera sensor patterns.")
+
+    # AI watermark
+    if "watermark" in tech_lower and "ai" in tech_lower:
+        context_additions.append("We detected a hidden AI watermark in the image.")
+
+    # Synthetic/Generated patterns
+    if "synthetic" in tech_lower or "grid" in tech_lower:
+        if verdict in ["AI-GENERATED", "EDITED"]:
+            context_additions.append("We found patterns typically created by AI image generators.")
+
+    # Model consensus
+    if "consensus" in tech_lower or "models" in tech_lower:
+        if "real" in tech_lower:
+            context_additions.append("Multiple AI detection systems agree this looks authentic.")
+        elif "ai" in tech_lower:
+            context_additions.append("Multiple AI detection systems flagged this as potentially generated.")
+
+    # Physical impossibilities
+    if "impossible" in tech_lower:
+        if "reflection" in tech_lower or "corneal" in tech_lower:
+            context_additions.append("The reflections in the eyes don't match what we'd expect in a real photo.")
+        elif "shadow" in tech_lower or "geometry" in tech_lower:
+            context_additions.append("The shadows or shapes in this image don't follow natural physics.")
+        elif "light" in tech_lower:
+            context_additions.append("The lighting in this image doesn't look physically realistic.")
+
+    # Compression/quality issues
+    if "compress" in tech_lower or "jpeg" in tech_lower or "quality" in tech_lower:
+        context_additions.append("Note: Image quality loss may have affected our analysis.")
+
+    # Texture authenticity
+    if "texture" in tech_lower and "authentic" in tech_lower:
+        context_additions.append("The image textures match those of real photographs.")
+
+    # Conflicting signals
+    if "conflict" in tech_lower:
+        base_desc = "This image shows mixed signals - some parts look real while others show signs of editing."
+
+    # Enhancement/Upscaling
+    if "upscal" in tech_lower or "enhanc" in tech_lower:
+        context_additions.append("This image appears to have been enhanced or upscaled using AI.")
+
+    # Insufficient evidence
+    if "insufficient" in tech_lower:
+        return "We couldn't find enough evidence to confidently determine if this image is real or AI-generated."
+
+    # Build final description
+    if context_additions:
+        # Limit to 1-2 context points to keep it concise
+        context = " " + context_additions[0]
+        if len(context_additions) > 1:
+            context += " " + context_additions[1]
+        return base_desc + context
+
+    return base_desc
+
+
+def humanize_verdict_description(verdict: str, technical_desc: str, final_score: int) -> str:
+    """
+    Public function to convert technical forensic descriptions to user-friendly text.
+    Ensures the output is concise (under 200 characters when possible).
+    """
+    friendly = _humanize_description(verdict, technical_desc, final_score)
+
+    # Ensure it's not too long
+    if len(friendly) > 250:
+        # Truncate at last complete sentence within limit
+        sentences = friendly.split('. ')
+        result = ""
+        for sentence in sentences:
+            if len(result) + len(sentence) + 2 <= 250:
+                result += sentence + ". "
+            else:
+                break
+        friendly = result.strip()
+        if not friendly.endswith('.'):
+            friendly += "."
+
+    return friendly
+
 
 # ============================================================================
 # LAYER WEIGHTS
@@ -144,10 +311,10 @@ def calculate_integrity(
             prnu_strength = abs(raw_scores.get('prnu', 0)) / 50.0
             physics_strength = raw_scores.get('physics', 0) / 50.0
             corroboration = 1.0 if (raw_scores.get('eye', 0) > 0 and raw_scores.get('spectrum', 0) > 0) else 0.6
-            
+
             confidence = (prnu_strength * 0.5 + physics_strength * 0.3 + corroboration * 0.2)
             dynamic_score = int(35 + (1 - confidence) * 20)  # range: 35–55
-            
+
             return (
                 dynamic_score,
                 "AI-ENHANCED",
@@ -338,7 +505,7 @@ def calculate_integrity(
         # Use PRNU details if provided for audit
         if prnu_details:
              print(f"    PRNU Details: {prnu_details}")
-             
+
         print(f"\n  [Kill Switch 1] PRNU reports synthetic grid (score={prnu_score})")
 
         # FIX-8: BAYER CONTRADICTION CHECK
@@ -388,7 +555,7 @@ def calculate_integrity(
             if model_consensus_override == "REAL":
                 print(f"    [!] MODEL CONSENSUS OVERRIDE: {model_real_votes}/{model_count} models say REAL")
                 print(f"    → PRNU synthetic grid vs model consensus = CONFLICT")
-                
+
                 # Dynamic scoring for PRNU conflict
                 prnu_strength = abs(prnu_score) / 50.0
                 model_strength = model_real_votes / max(1.0, float(model_count))
@@ -921,3 +1088,4 @@ if __name__ == "__main__":
     print(f"\nFINAL VERDICT: {verdict} ({final_score}/100)")
     print(f"Explanation: {description}")
     print(f"Effective Scores: {effective_scores}")
+
