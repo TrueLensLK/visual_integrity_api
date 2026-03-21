@@ -60,7 +60,7 @@ import os
 from typing import Tuple, Dict, Optional
 
 # ==========================================
-# CONFIGURATION - 5 MODEL ENSEMBLE (v4.0)
+# CONFIGURATION - 6 MODEL ENSEMBLE (v5.0)
 # ==========================================
 # 1. SDXL Detector (HuggingFace) - Stable Diffusion XL specialist
 #    Replaces EfficientNet-B0 which was trained on older GAN data
@@ -69,21 +69,27 @@ SDXL_MODEL_NAME = "Organika/sdxl-detector"
 # 2. ViT Transformer Settings (HuggingFace) - Deepfake specialist
 VIT_MODEL_NAME = "prithivMLmods/Deep-Fake-Detector-v2-Model"
 
-# 3. SigLIP2 Settings (HuggingFace) - Global coherence detector
+# 3. Deepfake Face-Swap Expert (HuggingFace) - Face-Swap specialist
+#    New for v5.0 - Only runs when face is detected
+DEEPFAKE_MODEL_NAME = "prithivMLmods/deepfake-detector-model-v1"
+
+# 4. SigLIP2 Settings (HuggingFace) - Global coherence detector
 SIGLIP_MODEL_NAME = "prithivMLmods/open-deepfake-detection"
 
-# 4. ConvNeXt AI Detector (HuggingFace) - Modern CNN for AI detection
+# 5. ConvNeXt AI Detector (HuggingFace) - Modern CNN for AI detection
 CONVNEXT_MODEL_NAME = "umm-maybe/AI-image-detector"
 
-# 5. Swin Transformer (HuggingFace) - Another deepfake detector
+# 6. Swin Transformer (HuggingFace) - Another deepfake detector
 SWIN_MODEL_NAME = "Wvolf/ViT_Deepfake_Detection"  # Alternative Swin-based detector
 
-# 6. Ensemble weights (sum = 1.0) - Spread across 5 models
-W_SDXL     = 0.15  # SDXL/Diffusion specialist
-W_VIT      = 0.22  # Macro-geometry specialist  
-W_SIGLIP   = 0.22  # Global coherence specialist
-W_CONVNEXT = 0.22  # Modern CNN specialist
-W_SWIN     = 0.19  # Hierarchical transformer
+# 7. Ensemble weights (sum = 1.0) - Spread across 6 models
+#    NOTE: If no face is detected, W_DEEPFAKE is redistributed or model skipped
+W_SDXL      = 0.15
+W_VIT       = 0.15
+W_DEEPFAKE  = 0.20  # Strong weight for face swaps
+W_SIGLIP    = 0.18
+W_CONVNEXT  = 0.17
+W_SWIN      = 0.15
 
 # ==========================================
 # GLOBAL MODEL CACHE (Singleton pattern)
@@ -96,6 +102,9 @@ _sdxl_fake_idx = 0  # Auto-detected on load
 _vit_model = None
 _vit_processor = None
 _vit_fake_idx = 1  # Auto-detected on load
+_deepfake_model = None      # New
+_deepfake_processor = None  # New
+_deepfake_fake_idx = 0      # New
 _sig_model = None
 _sig_processor = None
 _sig_fake_idx = 0  # Auto-detected on load
@@ -127,6 +136,7 @@ def _load_models():
     global _models_loaded, _device
     global _sdxl_model, _sdxl_processor, _sdxl_fake_idx
     global _vit_model, _vit_processor, _vit_fake_idx
+    global _deepfake_model, _deepfake_processor, _deepfake_fake_idx
     global _sig_model, _sig_processor, _sig_fake_idx
     global _convnext_model, _convnext_processor, _convnext_fake_idx
     global _swin_model, _swin_processor, _swin_fake_idx
@@ -135,7 +145,7 @@ def _load_models():
         return _device
     
     _device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[Layer 4] Initializing 5-Model Ensemble v4.0 on {_device}...")
+    print(f"[Layer 4] Initializing 6-Model Ensemble v5.0 on {_device}...")
 
     # --- 4.1: Load SDXL Detector (Replaces EfficientNet-B0) ---
     try:
@@ -162,6 +172,19 @@ def _load_models():
         print(f"[Layer 4.2 Error] ViT Load Failed: {e}")
         _vit_model = None
         _vit_processor = None
+
+    # --- 4.3: Load Deepfake Face-Swap Expert (New v5.0) ---
+    try:
+        print(f"[Layer 4.3] Loading Deepfake Expert: {DEEPFAKE_MODEL_NAME}...")
+        _deepfake_processor = AutoImageProcessor.from_pretrained(DEEPFAKE_MODEL_NAME)
+        _deepfake_model = AutoModelForImageClassification.from_pretrained(DEEPFAKE_MODEL_NAME)
+        _deepfake_model.to(_device).eval()
+        _deepfake_fake_idx = _detect_fake_index(_deepfake_model, "Deepfake-Expert")
+        print("[Layer 4.3] Deepfake Expert loaded")
+    except Exception as e:
+        print(f"[Layer 4.3 Error] Deepfake Expert Load Failed: {e}")
+        _deepfake_model = None
+        _deepfake_processor = None
 
     # --- 4.3: Load SigLIP2 (Global coherence detector) ---
     if HAS_SIGLIP:
@@ -338,6 +361,56 @@ def _run_vit_tta(image: Image.Image, device: str) -> Tuple[Optional[float], Opti
         
     except Exception as e:
         print(f"   [4.2 ViT Error] {e}")
+        return None, None
+
+
+def _run_deepfake_tta(image: Image.Image, device: str) -> Tuple[Optional[float], Optional[float]]:
+    """
+    Run Deepfake Face-Swap Expert with Test-Time Augmentation.
+    Specialized for face swaps and deepfakes. Only runs if faces are detected.
+    
+    Returns: (score, confidence) or (None, None) if model unavailable
+    """
+    if _deepfake_model is None or _deepfake_processor is None:
+        return None, None
+    
+    tta_transforms = _get_tta_transforms()
+    all_probs = []
+    
+    try:
+        for aug_fn in tta_transforms:
+            img_aug = aug_fn(image)
+            inputs = _deepfake_processor(images=img_aug, return_tensors="pt").to(device)
+            
+            with torch.no_grad():
+                outputs = _deepfake_model(**inputs)
+                probs = torch.nn.functional.softmax(outputs.logits, dim=1)
+                all_probs.append(probs.cpu().numpy()[0])
+        
+        # Average TTA predictions
+        avg_probs = np.mean(all_probs, axis=0)
+        
+        # Use auto-detected fake index
+        fake_idx = _deepfake_fake_idx
+        real_idx = 1 - fake_idx
+        
+        prob_fake = avg_probs[fake_idx]
+        prob_real = avg_probs[real_idx]
+        
+        # Calculate score: -50 (fake) to +50 (real)
+        score = (prob_real - prob_fake) * 50
+        
+        # Calculate confidence from entropy
+        entropy = _calculate_entropy(avg_probs)
+        confidence = 1.0 - (entropy / 0.693)
+        
+        print(f"   [4.3 Deepfake] P(fake)={prob_fake:.3f} P(real)={prob_real:.3f} "
+              f"-> score={score:+.1f} (conf={confidence:.2f})")
+        
+        return score, confidence
+        
+    except Exception as e:
+        print(f"   [4.3 Deepfake Error] {e}")
         return None, None
 
 
@@ -591,7 +664,7 @@ def predict_visuals(file_path: str) -> float:
         print(f"   [Layer 4 Error] {e}")
         return 0.0
     
-def predict_visuals_detailed(file_path: str) -> Dict:
+def predict_visuals_detailed(file_path: str, face_count: int = 0) -> Dict:
     """
     Extended version returning full analysis details.
     Useful for debugging and explainability.
@@ -601,18 +674,34 @@ def predict_visuals_detailed(file_path: str) -> Dict:
         device = _load_models()
         image = Image.open(file_path).convert('RGB')
         
-        eff_score, eff_conf = _run_sdxl_tta(image, device)
+        # Run base models
+        sdxl_score, sdxl_conf = _run_sdxl_tta(image, device)
         vit_score, vit_conf = _run_vit_tta(image, device)
         sig_score, sig_conf = _run_siglip_tta(image, device)
         convnext_score, convnext_conf = _run_convnext_tta(image, device)
         swin_score, swin_conf = _run_swin_tta(image, device)
         
+        # Run Deepfake Expert ONLY if faces are detected
+        deepfake_score, deepfake_conf = None, None
+        if face_count > 0:
+            print(f"   [Layer 4] Face detected ({face_count}). Running Deepfake Expert.")
+            deepfake_score, deepfake_conf = _run_deepfake_tta(image, device)
+        else:
+            print(f"   [Layer 4] No faces detected. Skipping Deepfake Expert.")
+
+        # --- FIX: Null out Swin if no face detected (it defaults to REAL on scenery) ---
+        if face_count == 0:
+            if swin_score is not None:
+                print(f"   [Layer 4] ! NO FACE: Nulling Swin score ({swin_score:+.1f}) — face-swap model invalid on faceless image")
+                swin_score = None
+                swin_conf = None
+        
         # Calculate ensemble
         scores, confidences, weights, model_names = [], [], [], []
         
-        if eff_score is not None:
-            scores.append(eff_score)
-            confidences.append(eff_conf)
+        if sdxl_score is not None:
+            scores.append(sdxl_score)
+            confidences.append(sdxl_conf)
             weights.append(W_SDXL)
             model_names.append("sdxl")
         if vit_score is not None:
@@ -620,6 +709,11 @@ def predict_visuals_detailed(file_path: str) -> Dict:
             confidences.append(vit_conf)
             weights.append(W_VIT)
             model_names.append("vit")
+        if deepfake_score is not None:
+            scores.append(deepfake_score)
+            confidences.append(deepfake_conf)
+            weights.append(W_DEEPFAKE)
+            model_names.append("deepfake")
         if sig_score is not None:
             scores.append(sig_score)
             confidences.append(sig_conf)
@@ -643,29 +737,51 @@ def predict_visuals_detailed(file_path: str) -> Dict:
         n_models = len(scores)
         
         # ================================================================
-        # 5-MODEL CONSENSUS LOGIC
+        # 6-MODEL CONSENSUS LOGIC (v5.0)
         # ================================================================
-        
+
+        # Fix C: Outlier Detection Rule (Cluster-Based)
+        # When one model is > 40 points from the average of others, kill it.
+        if len(scores) >= 3:
+            for idx in range(len(scores)):
+                current_score = scores[idx]
+                others = [scores[j] for j in range(len(scores)) if j != idx]
+                avg_others = sum(others) / len(others)
+                dist = abs(current_score - avg_others)
+                
+                if dist > 40:
+                    print(f"   [Layer 4] ! OUTLIER DETECTED: {model_names[idx]} "
+                          f"({current_score:+.1f}) is {dist:.1f} pts from cluster avg ({avg_others:+.1f}). "
+                          f"Dropping weight to near-zero.")
+                    weights[idx] = 0.001  # Effectively remove from aggregate
+
         # 1. Confidence-weighted scoring
         conf_weights = []
         for i, (s, c, w) in enumerate(zip(scores, confidences, weights)):
-            conf_factor = 0.3 + 0.7 * c
+            # Give bonus to high confidence predictions
+            conf_factor = 0.3 + 0.7 * c 
             conf_weights.append(w * conf_factor)
+            
         total_cw = sum(conf_weights)
-        conf_weights = [cw / total_cw for cw in conf_weights]
+        if total_cw > 0:
+            conf_weights = [cw / total_cw for cw in conf_weights]
+        else:
+            conf_weights = [1.0 / n_models] * n_models
         
         raw_score = sum(s * cw for s, cw in zip(scores, conf_weights))
         overall_conf = sum(c * cw for c, cw in zip(confidences, conf_weights))
         
         # 2. High-confidence override (ONLY specialized models)
-        SPECIALIZED_MODELS = ["vit", "siglip", "convnext", "swin", "sdxl"]
+        SPECIALIZED_MODELS = ["vit", "deepfake", "siglip", "convnext", "swin"]
         high_conf_override = False
         for i, c in enumerate(confidences):
             if c > 0.85 and model_names[i] in SPECIALIZED_MODELS:
-                others_uncertain = all(confidences[j] < 0.35 for j in range(n_models) if j != i)
+                # If specific expert is VERY sure, and others are uncertain
+                others_uncertain = all(confidences[j] < 0.40 for j in range(n_models) if j != i)
                 if others_uncertain:
+                    # Trust the expert
                     raw_score = scores[i]
-                    overall_conf = confidences[i] * 0.85
+                    overall_conf = confidences[i] * 0.90
                     high_conf_override = True
                     break
         
@@ -677,35 +793,50 @@ def predict_visuals_detailed(file_path: str) -> Dict:
         model_consensus = max(ai_votes, real_votes) / n_models if n_models > 0 else 0
         consensus_direction = "REAL" if real_votes > ai_votes else "AI" if ai_votes > real_votes else "NEUTRAL"
         
+        # Build strict model breakdown for Judge/Case File
+        model_breakdown = {
+            "sdxl": {"score": sdxl_score, "conf": sdxl_conf} if sdxl_score is not None else None,
+            "vit": {"score": vit_score, "conf": vit_conf} if vit_score is not None else None,
+            "deepfake_expert": {"score": deepfake_score, "conf": deepfake_conf} if deepfake_score is not None else None,
+            "siglip": {"score": sig_score, "conf": sig_conf} if sig_score is not None else None,
+            "convnext": {"score": convnext_score, "conf": convnext_conf} if convnext_score is not None else None,
+            "swin": {"score": swin_score, "conf": swin_conf} if swin_score is not None else None
+        }
+
+        # 4. Disagreement handling
+        
         # 4. Disagreement handling
         model_disagreement = False
-        max_gap = max(abs(scores[i] - scores[j]) 
-                     for i in range(n_models) for j in range(i+1, n_models)) if n_models >= 2 else 0
-        
         if n_models >= 2:
+            max_gap = max(scores) - min(scores)
             signs = [s > 0 for s in scores]
             sign_disagree = len(set(signs)) > 1
-            if sign_disagree or max_gap > 35:
+            
+            if sign_disagree or max_gap > 40:
                 model_disagreement = True
+                # Penalize score if disagreement is high
                 if raw_score < 0:
-                    uncertainty_pull = min(0.7, max_gap / 100.0)
+                    uncertainty_pull = min(0.6, max_gap / 100.0)
                     raw_score = raw_score * (1 - uncertainty_pull)
-                disagreement_penalty = min(0.6, max_gap / 80.0)
+                
+                disagreement_penalty = min(0.5, max_gap / 100.0)
                 overall_conf *= (1.0 - disagreement_penalty)
         
-        # 5. AI consensus requirement (need more agreement with 5 models)
-        if raw_score < -15:
-            if ai_votes < 3 and overall_conf < 0.5:
-                raw_score *= 0.5
+        # 5. AI consensus requirement
+        # If score is very AI-heavy, ensure we have at least partial consensus
+        if raw_score < -20:
+            if ai_votes < 2 and overall_conf < 0.6:
+                 # Protection against single-model false positives
+                raw_score *= 0.6 
         
-        # 6. REAL consensus boost (4+ models agreeing = strong signal)
-        if real_votes >= 4 and overall_conf >= 0.55:
-            raw_score = max(raw_score, 20.0)
+        # 6. REAL consensus boost
+        if real_votes >= 4 and overall_conf >= 0.60:
+            raw_score = max(raw_score, 25.0)
         
-        # 7. Final dampening
-        min_confidence = 0.25
+        # 7. Final dampening based on confidence
+        min_confidence = 0.30
         if overall_conf < min_confidence:
-            dampening = max(0.15, overall_conf / min_confidence)
+            dampening = max(0.2, overall_conf / min_confidence)
         else:
             dampening = 1.0
         
@@ -715,25 +846,25 @@ def predict_visuals_detailed(file_path: str) -> Dict:
         findings = [
             f"Ensemble confidence: {overall_conf*100:.1f}%",
             f"TTA augmentations: 4 per model",
-            f"Models used: {n_models}/5",
+            f"Models used: {n_models}/6",
             f"AI votes: {ai_votes}/{n_models}, Real votes: {real_votes}/{n_models}",
             f"Model consensus: {model_consensus*100:.0f}% ({consensus_direction})"
         ]
         if model_disagreement:
-            findings.append(f"Model disagreement detected (gap={max_gap:.1f})")
+            findings.append(f"Model disagreement detected")
         if high_conf_override:
             findings.append("High-confidence override active")
         if real_votes >= 4:
-            findings.append("STRONG REAL CONSENSUS (4+ models)")
+            findings.append("STRONG REAL CONSENSUS")
         if ai_votes >= 4:
-            findings.append("STRONG AI CONSENSUS (4+ models)")
+            findings.append("STRONG AI CONSENSUS")
         
         result = {
             "impact": round(final_score, 2),
             "raw_score": round(raw_score, 2),
             "confidence": round(overall_conf, 2),
             "dampening": round(dampening, 2),
-            "is_uncertain": overall_conf < 0.4 or model_disagreement,
+            "is_uncertain": overall_conf < 0.45 or model_disagreement,
             "model_count": n_models,
             "ai_votes": ai_votes,
             "real_votes": real_votes,
@@ -741,14 +872,17 @@ def predict_visuals_detailed(file_path: str) -> Dict:
             "consensus_direction": consensus_direction,
             "model_disagreement": model_disagreement,
             "high_conf_override": high_conf_override,
+            "model_breakdown": model_breakdown,
             "findings": findings
         }
         
         # Add individual model results
-        if eff_score is not None:
-            result["sdxl"] = {"score": round(eff_score, 2), "confidence": round(eff_conf, 2)}
+        if sdxl_score is not None:
+            result["sdxl"] = {"score": round(sdxl_score, 2), "confidence": round(sdxl_conf, 2)}
         if vit_score is not None:
             result["vit"] = {"score": round(vit_score, 2), "confidence": round(vit_conf, 2)}
+        if deepfake_score is not None:
+            result["deepfake"] = {"score": round(deepfake_score, 2), "confidence": round(deepfake_conf, 2)}
         if sig_score is not None:
             result["siglip"] = {"score": round(sig_score, 2), "confidence": round(sig_conf, 2)}
         if convnext_score is not None:
@@ -759,6 +893,7 @@ def predict_visuals_detailed(file_path: str) -> Dict:
         return result
         
     except Exception as e:
+        print(f"Error in predict_visuals_detailed: {e}")
         return {"impact": 0, "confidence": 0, "is_uncertain": True,
                 "findings": [f"Error: {str(e)}"], "model_consensus": 0, "total_models": 0}
 

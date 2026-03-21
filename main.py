@@ -68,6 +68,7 @@ try:
        from Universal_Detector.src.layers.layer_10_Shadow_Convergence import get_shadow_score
        from Universal_Detector.src.layers.layer_11_physical_continuity import get_physical_continuity_score
        from Universal_Detector.src.layers.layer_12_artifacts import analyze_artifacts
+       from Universal_Detector.src.utils.origin_classifier import classify_origin
 except ImportError as e:
     print(f"CRITICAL: Missing forensic layer modules. {e}")
     sys.exit(1)
@@ -212,10 +213,13 @@ class AIImageDetector:
 
         # --- LAYER 3.5: FACES ---
         self.log("Layer 3.5: Face Consistency")
+        face_count = 0
         try:
             f_res = analyze_face_consistency(image_path)
             layer_scores["face_consistency"] = f_res["impact"] if isinstance(f_res, dict) else f_res
-            layer_details["face_consistency"] = f"Faces: {f_res.get('face_count', 0)}"
+            if isinstance(f_res, dict):
+                face_count = f_res.get('face_count', 0)
+            layer_details["face_consistency"] = f"Faces: {face_count}"
         except Exception:
             layer_scores["face_consistency"] = 0
 
@@ -224,13 +228,15 @@ class AIImageDetector:
         visual_confidence = 1.0
         model_consensus = 0.0
         model_real_votes, model_ai_votes = 0, 0
+        model_breakdown = {}
         try:
-            v_det = predict_visuals_detailed(image_path)
+            v_det = predict_visuals_detailed(image_path, face_count=face_count)
             visual_score = v_det.get("impact", 0)
             visual_confidence = v_det.get("confidence", 1.0)
             model_real_votes = v_det.get("real_votes", 0)
             model_ai_votes = v_det.get("ai_votes", 0)
             model_consensus = v_det.get("model_consensus", 0.0)
+            model_breakdown = v_det.get("model_breakdown", {})  # Capture breakdown for Fix 3, 15, 16
             
             layer_scores["neural_network"] = visual_score
             layer_details["neural_network"] = f"Votes: Real {model_real_votes} / AI {model_ai_votes}"
@@ -305,6 +311,74 @@ class AIImageDetector:
         except Exception: layer_scores["artifacts"] = 0
 
         # ========================================
+        # FIX 5: ORIGIN CLASSIFICATION
+        # ========================================
+        self.log("Fix 5: Origin Classification")
+        origin_classification = "CAMERA_ORIGINAL"
+        is_web_sourced = False
+        try:
+             # Gather signals
+             from PIL import Image
+             try:
+                 with Image.open(image_path) as img:
+                     dims = img.size
+             except: dims = None
+             
+             origin_res = classify_origin(
+                 file_path=image_path,
+                 meta_score=layer_scores.get("metadata", 0),
+                 spectrum_details=layer_details.get("spectrum", ""),
+                 image_dims=dims
+             )
+             
+             origin_classification = origin_res["classification"]
+             is_web_sourced = origin_res["is_web_sourced"]
+             unreliable_layers = origin_res["unreliable_layers"]
+             
+             self.log(f"Origin: {origin_classification} (Web: {is_web_sourced})")
+             if origin_res["reasoning"]:
+                 self.log(f"Reasoning: {', '.join(origin_res['reasoning'])}")
+
+             # Zero out unreliable layers (ONLY if strictly WEB_SOURCED)
+             if origin_classification == "WEB_SOURCED":
+                 # Fix A & Fix B: Zero specific layers and hide details
+                 # List of layers that are unreliable on web images (compression destroys signature)
+                 always_zero_layers = [
+                     "prnu", "spectrum", "watermark", "metadata", 
+                     "eye_physics", "shadow", "physical_continuity", "context"
+                 ]
+                 
+                 for layer in always_zero_layers:
+                     if layer in layer_scores:
+                         self.log(f"  -> Zeroing {layer} (unreliable on web image)")
+                         layer_scores[layer] = 0.0
+                         # Fix B: Suppress detail string so Defense doesn't cite invalid evidence
+                         layer_details[layer] = (
+                             "DISABLED | Signal zeroed — web-sourced image. "
+                             "High-frequency signatures are unreliable due to compression pipeline. "
+                             "Do not cite this as evidence."
+                         )
+
+                 # Fix A (Part 2): Conditional zeroing for face_consistency
+                 if "face_consistency" in layer_scores:
+                     fc_score = layer_scores["face_consistency"]
+                     # Range -35 to -5 is the "danger zone" where compression artifacts mimic face anomalies
+                     if -35 <= fc_score <= -5:
+                        self.log(f"  -> Zeroing face_consistency ({fc_score}) - likely compression artifact")
+                        layer_scores["face_consistency"] = 0.0
+                        layer_details["face_consistency"] = (
+                            "DISABLED | Score zeroed — moderate face anomaly likely caused by "
+                            "web compression (mozjpeg). Do not cite."
+                        )
+                     else:
+                        self.log(f"  -> Keeping face_consistency ({fc_score}) - severe anomaly survives compression")
+             
+             layer_details["origin"] = origin_classification
+             
+        except Exception as e:
+            self.log(f"Origin classification error: {e}", "WARN")
+
+        # ========================================
         # LAYER 5: MASTER JUDGE (Rule-Based)
         # ========================================
         self.log("Layer 5: Master Judge (Rule-Based)")
@@ -333,7 +407,11 @@ class AIImageDetector:
             model_ai_votes=model_ai_votes,
             model_count=5,
             model_consensus=model_consensus,
-            has_bayer_pattern=has_bayer_pattern
+            has_bayer_pattern=has_bayer_pattern,
+            face_count=face_count,
+            model_breakdown=model_breakdown,
+            origin_classification=origin_classification, # Fix 5
+            is_web_sourced=is_web_sourced # Fix 5
         )
 
         rule_based_verdict = verdict
@@ -364,7 +442,8 @@ class AIImageDetector:
                     model_real_votes=model_real_votes,
                     model_ai_votes=model_ai_votes,
                     warnings=self.warnings,
-                    effective_scores=effective_scores
+                    effective_scores=effective_scores,
+                    model_breakdown=model_breakdown  # Added for fallback logic
                 )
 
                 # 2. Consult Hybrid Judge

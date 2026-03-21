@@ -67,13 +67,15 @@ Look at the image carefully.
 
 === VERDICT LOGIC ===
 - AI-GENERATED: Visual artifacts found OR strong forensic evidence (PRNU grid, Spectrum anomalies) without compression cause.
+- LIKELY_AI_GENERATED: Strong suspicion of AI origin, but critical evidence is degraded or inconclusive (Score 25-49 range).
+- LIKELY_REAL: Natural appearance and valid physics, but some forensic signals are weak or missing (Score 50-75 range).
 - REAL: Natural details (pores, hair) + Physics (ISO noise, Bayer) + No AI artifacts.
 - EDITED: Real image with some manipulation (color, cropping) leading to mixed signals.
 
 === OUTPUT FORMAT ===
 You MUST respond with ONLY a valid JSON object.
 {
-    "verdict": "REAL", "AI-GENERATED", "AI-ENHANCED", or "EDITED",
+    "verdict": "REAL", "LIKELY_REAL", "LIKELY_AI_GENERATED", "AI-GENERATED", or "EDITED",
     "confidence": 0.0 to 1.0,
     "reasoning": "Explain your visual analysis findings first, then how they align/conflict with the case file.",
     "key_evidence": ["Visual: ...", "Forensic: ..."],
@@ -145,7 +147,8 @@ class ForensicAgent:
         try:
             import google.generativeai as genai
             genai.configure(api_key=self.gemini_api_key)
-            model_name = self.model_name or "gemini-2.5-flash"
+            # Use Gemini 2.0 Flash as requested
+            model_name = "gemini-2.0-flash"
             print(f"[LLM Judge] Initializing Gemini model: {model_name}")
             self._gemini_model = genai.GenerativeModel(model_name)
         except Exception as e:
@@ -281,21 +284,17 @@ class ForensicAgent:
             full_prompt = f"{visual_reminder}\n\n=== CASE FILE DATA ===\n{case_string}\n\n=== END CASE FILE ==="
 
         # 2. Select Provider Order
+        # STRICT REQUIREMENT: User requested ONLY Gemini for Judge.
         providers = []
-        if image_path:
-            # Prioritize Vision models if image exists
-            if self.gemini_api_key:
+        if self.gemini_api_key:
+            if image_path:
                 providers.append(("Gemini (Vision)", lambda: self._call_gemini(full_prompt, image_path)))
-            if self.openrouter_api_key:
-                providers.append(("OpenRouter (Vision)", lambda: self._call_openrouter(full_prompt, image_path)))
-            if self.groq_api_key:
-                providers.append(("Groq (Text-Only)", lambda: self._call_groq(full_prompt, image_path)))
-        else:
-            # Text-only Fallbacks
-            if self.groq_api_key:
-                providers.append(("Groq", lambda: self._call_groq(full_prompt)))
-            if self.gemini_api_key:
+            else:
                 providers.append(("Gemini", lambda: self._call_gemini(full_prompt)))
+        
+        # If no Gemini, we fail (as requested to remove others)
+        if not providers:
+            print("[LLM Judge] CRITICAL: Gemini API Key missing, and other providers disabled by configuration.")
 
         # 3. Execution Loop
         last_error = "No providers available"
@@ -373,17 +372,29 @@ class HybridJudge:
             try:
                 try:
                     from debate import DebateOrchestrator
+                    from debate.visual_expert_agent import VisualExpertAgent
                 except ImportError:
                     from .debate import DebateOrchestrator
+                    from .debate.visual_expert_agent import VisualExpertAgent
+                
+                # Initialize Debate Orchestrator
                 self.debate = DebateOrchestrator(
-                    gemini_api_key=self.agent.gemini_api_key,
-                    openrouter_api_key=self.agent.openrouter_api_key,
+                    # No longer passing gemini key for debate as per user request
                     groq_api_key=self.agent.groq_api_key
                 )
-                print("[HybridJudge] Adversarial Debate system enabled")
+                
+                # Initialize Visual Expert (uses same keys as debate)
+                self.visual_expert = VisualExpertAgent(
+                    groq_api_key=self.agent.groq_api_key,
+                    cerebras_api_key=os.environ.get("CEREBRAS_API_KEY"),
+                    gemini_api_key=self.agent.gemini_api_key
+                )
+                
+                print("[HybridJudge] Adversarial Debate system enabled (Groq+Cerebras)")
             except Exception as e:
-                print(f"[HybridJudge] Debate system disabled: {e}")
+                print(f"[HybridJudge] Debate/Expert system disabled: {e}")
                 self.debate = None
+                self.visual_expert = None
 
     def _should_debate(self, case_file: Dict) -> Tuple[bool, str]:
         """
@@ -404,7 +415,7 @@ class HybridJudge:
         real_v = neural.get("real_votes", 0)
         ai_v = neural.get("ai_votes", 0)
         total = real_v + ai_v
-        if total >= 4 and abs(real_v - ai_v) <= 1:
+        if total >= 3 and abs(real_v - ai_v) <= 1:
             return True, f"Neural civil war: {real_v} Real vs {ai_v} AI votes"
 
         return False, ""
@@ -464,44 +475,56 @@ class HybridJudge:
         image_path: Optional[str] = None
     ) -> Tuple[str, int, str, Optional[LLMVerdict]]:
         
-        # ── Phase 0: Explicit Agent Escalation ──
-        if rule_based_verdict == "AMBIGUOUS_REQUIRES_AGENT":
-            print(f"[HybridJudge] Layer 5 requested agent escalation → launching debate/agent")
+        # ── Phase 0: Visual Expert Check (UNCERTAIN Web Images) ──
+        # Fix 15: If Rule-Based says UNCERTAIN on a Web Image, route to Visual Expert
+        is_web_sourced = False
+        # Check if evidence mentions "web-sourced" (from Fix 5 disable message)
+        all_evidence = case_file.get("all_evidence", [])
+        for item in all_evidence:
+            if "web-sourced" in str(item.get("detail", "")).lower():
+                is_web_sourced = True
+                break
+        
+        if is_web_sourced and rule_based_verdict == "UNCERTAIN" and self.visual_expert and image_path:
+            print(f"[HybridJudge] UNCERTAIN web image detected → Routing to Visual Expert")
             
-            if self.debate and image_path:
-                try:
-                    debate_result = self.debate.run_debate(
-                        image_path=image_path,
-                        case_file=case_file,
-                        contradiction_context=rule_based_description
-                    )
-                    
-                    if debate_result.verdict == "REAL":
-                        final_score = 50 + int(debate_result.confidence * 50)
-                    elif debate_result.verdict == "AI-GENERATED":
-                        final_score = 50 - int(debate_result.confidence * 50)
-                    else:
-                        final_score = 50
-                    
-                    return debate_result.verdict, final_score, f"[Debate Escalation] {debate_result.reasoning}", debate_result
-                except Exception as e:
-                    print(f"[HybridJudge] Escalated debate failed ({e}) → trying single agent")
-
-            # Fallback to single agent
-            if self.agent:
-                case_file["special_instruction"] = rule_based_description
-                llm_result = self.agent.make_final_call(case_file, image_path)
+            case_string = case_file_to_prompt_string(case_file)
+            expert_result = self.visual_expert.analyze(image_path, case_string)
+            
+            verdict = expert_result.verdict
+            final_score = rule_based_score
+            description = expert_result.reasoning
+            
+            # Apply Score Caps (Fix 17)
+            if verdict == "AI-GENERATED" or verdict == "LIKELY_AI_GENERATED":
+                # Max confidence on web image is capped -> Score 25 (Low end of 'Likely AI' range)
+                final_score = 25
+                verdict = "LIKELY_AI_GENERATED" # Enforce new user-requested label
+                description = f"[Visual Expert] {description} (Score capped at 25 due to missing hardware forensics)"
                 
-                if llm_result.verdict == "REAL":
-                    final_score = 50 + int(llm_result.confidence * 50)
-                elif llm_result.verdict == "AI-GENERATED":
-                    final_score = 50 - int(llm_result.confidence * 50)
-                else:
-                    final_score = 50
+            elif verdict == "LIKELY_REAL":
+                # Max confidence on web image is capped -> Score 72 (High end of 'Likely Real' range)
+                final_score = 72
+                description = f"[Visual Expert] {description} (Score capped at 72 due to missing hardware forensics)"
                 
-                return llm_result.verdict, final_score, f"[Agent Escalation] {llm_result.reasoning}", llm_result
+            else: # UNCERTAIN
+                final_score = 50
+                verdict = "UNCERTAIN"
+                description = f"[Visual Expert] {description} (Insufficient evidence for verdict)"
 
-            return ("EDITED", 50, "Agent escalation requested but no LLM available", None)
+            # Construct LLMVerdict
+            llm_verdict = LLMVerdict(
+                verdict=verdict,
+                confidence=expert_result.confidence,
+                reasoning=expert_result.reasoning,
+                key_evidence=expert_result.definitive_artifacts_found + expert_result.definitive_real_indicators,
+                contradictions_resolved=[],
+                source="visual_expert",
+                processing_time_ms=0,
+                raw_response=expert_result.raw_text
+            )
+            
+            return verdict, final_score, description, llm_verdict
 
         # ── Phase 1: Adversarial Debate for genuine contradictions ──
         if self.debate and image_path:
@@ -568,6 +591,18 @@ class HybridJudge:
         # ── Safety Net: If ALL LLM providers failed, fall back to rule-based ──
         if llm_result.source == "llm_error":
             print(f"[HybridJudge] All LLM providers failed → falling back to rule-based verdict")
+            
+            # Fix 18: Fallback to SDXL on LLM Error (Uncertain fallback)
+            sdxl_data = case_file.get("neural_consensus", {}).get("model_breakdown", {}).get("sdxl")
+            if sdxl_data:
+                sdxl_score = sdxl_data.get("score", 0)
+                if sdxl_score > 0:
+                   print(f"[HybridJudge] LIKELY_REAL override via SDXL (score={sdxl_score:+.1f})")
+                   return "LIKELY_REAL", 60, f"[LLM FAIL] Fallback to SDXL-Detector (REAL)", None
+                else:
+                   print(f"[HybridJudge] LIKELY_AI_GENERATED override via SDXL (score={sdxl_score:+.1f})")
+                   return "LIKELY_AI_GENERATED", 35, f"[LLM FAIL] Fallback to SDXL-Detector (AI)", None
+            
             return rule_based_verdict, rule_based_score, f"[LLM Unavailable] {rule_based_description}", None
         
         # ── Guardrail: LLM vs Rule-Based conflict ──
@@ -586,30 +621,13 @@ class HybridJudge:
                 "compressed", "model consensus", "false positive",
                 "downgrad", "dismissed"
             ])
-            
-            # AMENDMENT 1: Allow override if LLM is extremely confident (>90%)
-            # This implies the LLM sees something visually obvious that the rules missed.
-            is_super_confident = llm_result.confidence > 0.90
-            
-            # AMENDMENT 2: Allow override if LLM explicitly challenges the suppression
-            # If the LLM mentions "suppressed" or "dampened", it likely reviewed the
-            # specific contradiction warning we generated and decided the suppression was wrong.
-            challenges_suppression = any(kw in llm_result.reasoning.lower() for kw in [
-                "suppressed", "dampened", "ignored", "overlooked", "invalid dismissal"
-            ])
-
-            if rb_has_correction and not (is_super_confident or challenges_suppression):
+            if rb_has_correction:
                 print(f"[HybridJudge] LLM OVERRIDE BLOCKED")
                 print(f"    LLM: {final_verdict} @ {llm_result.confidence:.0%}")
                 print(f"    Rule-based: {rule_based_verdict} ({rule_based_score}/100)")
                 print(f"    Reason: Rule-based identified false positive; LLM used dismissed evidence")
                 print(f"    → Keeping rule-based verdict")
                 return rule_based_verdict, rule_based_score, rule_based_description, None
-            
-            if rb_has_correction and (is_super_confident or challenges_suppression):
-                print(f"[HybridJudge] LLM OVERRIDE ALLOWED (High Confidence/Challenge)")
-                print(f"    LLM: {final_verdict} @ {llm_result.confidence:.0%} (Confident: {is_super_confident})")
-                print(f"    Reason: LLM explicitly challenged the rule-based dismissal.")
 
         # Calculate Final Score based on LLM Confidence
         final_description = f"[LLM] {llm_result.reasoning}"
@@ -618,6 +636,21 @@ class HybridJudge:
             final_score = 50 + int(llm_result.confidence * 50)
         elif final_verdict == "AI-GENERATED":
             final_score = 50 - int(llm_result.confidence * 50)
+        
+        # ── Fix 18: Fallback to SDXL on UNCERTAIN ──
+        elif final_verdict == "UNCERTAIN" or final_verdict == "EDITED":
+            sdxl_data = case_file.get("neural_consensus", {}).get("model_breakdown", {}).get("sdxl")
+            if sdxl_data:
+                sdxl_score = sdxl_data.get("score", 0)
+                if sdxl_score > 0:
+                    print(f"[HybridJudge] LIKELY_REAL override via SDXL (score={sdxl_score:+.1f})")
+                    return "LIKELY_REAL", 60, f"[Fallback] LLM Uncertain -> SDXL says REAL ({sdxl_score:+.1f})", llm_result
+                else:
+                    print(f"[HybridJudge] LIKELY_AI_GENERATED override via SDXL (score={sdxl_score:+.1f})")
+                    return "LIKELY_AI_GENERATED", 35, f"[Fallback] LLM Uncertain -> SDXL says AI ({sdxl_score:+.1f})", llm_result
+            else:
+                final_score = 50
+
         else:
             final_score = 50
 

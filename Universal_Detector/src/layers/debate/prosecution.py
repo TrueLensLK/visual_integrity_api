@@ -1,19 +1,18 @@
 """
 Debate System — Prosecution Agent
-Argues AI-GENERATED using Gemini Vision (primary) with OpenRouter fallback.
-Includes retry with backoff for 429 quota errors.
+Argues AI-GENERATED using Groq (Primary) with Cerebras Fallback.
 """
 
 import json
-import time
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from .models import (
     AgentResponse,
     PROSECUTION_PROMPT,
-    OPENROUTER_VISION_MODELS,  # New import
     parse_agent_json,
     format_debate_history,
+    GROQ_MODEL,
+    CEREBRAS_MODEL,
     encode_image_base64,
     get_mime_type,
 )
@@ -23,244 +22,115 @@ class ProsecutionAgent:
     """
     Argues AI-GENERATED.
 
-    Primary:  Gemini Vision (gemini-2.0-flash - Aggressive, fast)
-    Fallback: OpenRouter Vision (different models)
+    Primary:  Groq (meta-llama/llama-4-scout-17b-16e-instruct)
+    Fallback: Cerebras (llama-3.3-70b)
 
-    Round 1: Vision call (sees the actual image + case file)
-    Rounds 2-3: Text-only rebuttals (argues from forensic evidence only)
+    Round 1: Vision call (sees actual image + formatted case file)
+    Rounds 2-3: Text-only rebuttals
     """
 
-    MAX_RETRIES = 2
-    RETRY_DELAYS = [10, 30]  # seconds to wait on 429
+    def __init__(self, groq_api_key: str, cerebras_api_key: str):
+        self._groq_key = groq_api_key
+        self._cerebras_key = cerebras_api_key
+        
+        self._groq_client = None
+        self._cerebras_client = None
 
-    def __init__(self, gemini_api_key: str, openrouter_api_key: str = ""):
-        self._model = None
-        self._gemini_key = gemini_api_key
-        self._openrouter_key = openrouter_api_key
-        self._openrouter_client = None
-        self._gemini_dead = False  # Set True after repeated 429s to skip retries
-
-    # ── Provider init ──────────────────────────────────────────────
-
-    def _init_gemini(self):
-        if self._model or not self._gemini_key or self._gemini_dead:
-            return
+    def _init_groq(self):
+        if self._groq_client or not self._groq_key: return
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=self._gemini_key)
-            self._model = genai.GenerativeModel("gemini-2.0-flash") # Aggressive, fast
+            from groq import Groq
+            self._groq_client = Groq(api_key=self._groq_key)
         except Exception as e:
-            print(f"[Debate/Prosecution] Gemini init failed: {e}")
+            print(f"[Prosecution] Groq init failed: {e}")
 
-    def _init_openrouter(self):
-        if self._openrouter_client or not self._openrouter_key:
-            return
+    def _init_cerebras(self):
+        if self._cerebras_client or not self._cerebras_key: return
         try:
             from openai import OpenAI
-            self._openrouter_client = OpenAI(
-                api_key=self._openrouter_key.strip(),
-                base_url="https://openrouter.ai/api/v1"
+            self._cerebras_client = OpenAI(
+                api_key=self._cerebras_key,
+                base_url="https://api.cerebras.ai/v1"
             )
         except Exception as e:
-            print(f"[Debate/Prosecution] OpenRouter fallback init failed: {e}")
+            print(f"[Prosecution] Cerebras init failed: {e}")
 
-    # ── Gemini calls (with retry) ──────────────────────────────────
+    def _call_groq(self, system: str, user: str, image_path: Optional[str]) -> Optional[str]:
+        self._init_groq()
+        if not self._groq_client: return None
 
-    def _gemini_vision_call(self, prompt: str, image_path: str) -> Optional[str]:
-        """Gemini vision call with retry on 429."""
-        self._init_gemini()
-        if not self._model:
-            return None
-        try:
-            import PIL.Image
-            with PIL.Image.open(image_path) as img:
-                img.load()
-                for attempt in range(1 + self.MAX_RETRIES):
-                    try:
-                        response = self._model.generate_content([prompt, img])
-                        return response.text
-                    except Exception as e:
-                        err_msg = str(e).lower()
-                        if ("429" in err_msg or "quota" in err_msg) and attempt < self.MAX_RETRIES:
-                            wait = self.RETRY_DELAYS[attempt]
-                            print(f"[Debate/Prosecution] 429/Quota hit, retry in {wait}s "
-                                  f"(attempt {attempt+1}/{self.MAX_RETRIES})")
-                            time.sleep(wait)
-                        elif "429" in err_msg or "quota" in err_msg:
-                            print(f"[Debate/Prosecution] Gemini quota exhausted after retries")
-                            self._gemini_dead = True
-                            return None
-                        else:
-                            raise
-        except Exception as e:
-            print(f"[Debate/Prosecution] Gemini vision failed: {e}")
-        return None
-
-    def _gemini_text_call(self, prompt: str) -> Optional[str]:
-        """Gemini text call with retry on 429."""
-        self._init_gemini()
-        if not self._model:
-            return None
-        for attempt in range(1 + self.MAX_RETRIES):
-            try:
-                response = self._model.generate_content(prompt)
-                return response.text
-            except Exception as e:
-                err_msg = str(e).lower()
-                if ("429" in err_msg or "quota" in err_msg) and attempt < self.MAX_RETRIES:
-                    wait = self.RETRY_DELAYS[attempt]
-                    print(f"[Debate/Prosecution] 429/Quota hit, retry in {wait}s "
-                          f"(attempt {attempt+1}/{self.MAX_RETRIES})")
-                    time.sleep(wait)
-                elif "429" in err_msg or "quota" in err_msg:
-                    print(f"[Debate/Prosecution] Gemini quota exhausted after retries")
-                    self._gemini_dead = True
-                    return None
-                else:
-                    print(f"[Debate/Prosecution] Gemini text failed: {e}")
-                    return None
-        return None
-
-    # ── OpenRouter fallback ────────────────────────────────────────
-
-    def _openrouter_call(self, user_prompt: str, image_path: Optional[str] = None) -> Optional[str]:
-        """OpenRouter fallback — uses a DIFFERENT model from defense (Qwen2.5-VL)."""
-        self._init_openrouter()
-        if not self._openrouter_client:
-            return None
-
-        messages = [{"role": "system", "content": PROSECUTION_PROMPT}]
-        user_content = []
-
+        messages = [{"role": "system", "content": system}]
+        content = []
         if image_path:
-            img_b64 = encode_image_base64(image_path)
-            mime = get_mime_type(image_path)
-            if img_b64:
-                user_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{img_b64}"}
-                })
+            # Try sending image if supported by model (Llama 4 Scout implies vision)
+            b64 = encode_image_base64(image_path)
+            if b64:
+                mime = get_mime_type(image_path)
+                content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        content.append({"type": "text", "text": user})
+        messages.append({"role": "user", "content": content})
 
-        user_content.append({"type": "text", "text": user_prompt})
-        messages.append({"role": "user", "content": user_content})
+        try:
+            resp = self._groq_client.chat.completions.create(
+                messages=messages,
+                model=GROQ_MODEL,
+                temperature=0.7,
+                response_format={"type": "json_object"}
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            print(f"[Prosecution] Groq error: {e}")
+            return None
 
-        # FALLBACK CHAIN for Prosecution
-        # We can use the same models but maybe prioritize Qwen for prosecution
-        models = OPENROUTER_VISION_MODELS 
+    def _call_cerebras(self, system: str, user: str, image_path: Optional[str]) -> Optional[str]:
+        self._init_cerebras()
+        if not self._cerebras_client: return None
+
+        # Text only fallback for Cerebras Llama 3.3 70b
+        final_user = user
+        if image_path:
+            final_user = f"[NOTE: Image analysis skipped in fallback]\n\n{user}"
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": final_user}
+        ]
         
-        last_error = None
-        for model in models:
-            try:
-                # print(f"[Debate/Prosecution] Trying OpenRouter model: {model}")
-                try:
-                    # Attempt with JSON mode first
-                    response = self._openrouter_client.chat.completions.create(
-                        model=model,
-                        messages=messages,
-                        temperature=0.1,
-                        max_tokens=2048,
-                        response_format={"type": "json_object"},
-                        extra_headers={"HTTP-Referer": "https://deepfake-detection.local"}
-                    )
-                except Exception as json_err:
-                    if "400" in str(json_err):
-                        # Retry without JSON mode if model doesn't support it
-                        response = self._openrouter_client.chat.completions.create(
-                            model=model,
-                            messages=messages,
-                            temperature=0.1,
-                            max_tokens=2048,
-                            extra_headers={"HTTP-Referer": "https://deepfake-detection.local"}
-                        )
-                    else:
-                        raise json_err
-
-                if response.choices:
-                    return response.choices[0].message.content
-
-            except Exception as e:
-                err_msg = str(e).lower()
-                if "404" in err_msg or "not found" in err_msg:
-                    print(f"[Debate/Prosecution] Model '{model}' 404 Not Found. Skipping.")
-                elif "400" in err_msg:
-                    print(f"[Debate/Prosecution] Model '{model}' 400 Bad Request. Skipping.")
-                elif "429" in err_msg:
-                    print(f"[Debate/Prosecution] Model '{model}' 429 Rate Limit. Skipping.")
-                else:
-                    print(f"[Debate/Prosecution] Model '{model}' failed: {e}. Skipping.")
-                last_error = e
-                continue
-
-        print(f"[Debate/Prosecution] All OpenRouter models failed. Last error: {last_error}")
-        return None
-
-    # ── Public interface ───────────────────────────────────────────
+        try:
+            resp = self._cerebras_client.chat.completions.create(
+                messages=messages,
+                model=CEREBRAS_MODEL,
+                temperature=0.7,
+                response_format={"type": "json_object"}
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            print(f"[Prosecution] Cerebras error: {e}")
+            return None
 
     def opening_statement(self, image_path: str, case_string: str) -> AgentResponse:
-        """Round 1: Vision call — sees the actual image + case file."""
-        prompt = f"""{PROSECUTION_PROMPT}
+        prompt = f"FORENSIC CASE FILE:\n{case_string}\n\nArgue AI-GENERATED based on evidence."
+        
+        # 1. Groq
+        text = self._call_groq(PROSECUTION_PROMPT, prompt, image_path)
+        if text: return parse_agent_json(text, "AI_GENERATED")
+        
+        # 2. Cerebras
+        print("[Prosecution] Falling back to Cerebras...")
+        text = self._call_cerebras(PROSECUTION_PROMPT, prompt, image_path)
+        if text: return parse_agent_json(text, "AI_GENERATED")
 
-FORENSIC CASE FILE:
-{case_string}
+        return AgentResponse("AI_GENERATED", 0.0, [], "", "", "All providers failed")
 
-You are opening the prosecution. Examine the image and the forensic case file.
-Present your strongest evidence that this image is AI GENERATED.
-Be specific about which forensic layer scores and findings you rely on."""
-
-        # Try Gemini first (with retry)
-        text = self._gemini_vision_call(prompt, image_path)
-
-        # Fallback to OpenRouter if Gemini failed
-        if not text:
-            print("[Debate/Prosecution] Falling back to OpenRouter (Qwen3-VL)")
-            text = self._openrouter_call(
-                f"FORENSIC CASE FILE:\n{case_string}\n\n"
-                "You are opening the prosecution. Examine the image and the forensic case file.\n"
-                "Present your strongest evidence that this image is AI GENERATED.\n"
-                "Be specific about which forensic layer scores and findings you rely on.",
-                image_path=image_path
-            )
-
-        if text:
-            return parse_agent_json(text, "AI_GENERATED")
-        return AgentResponse("AI_GENERATED", 0.5, [], "", "",
-                             "Prosecution unavailable (all providers failed)")
-
-    def respond(self, opponent_arg: AgentResponse, debate_history: list,
-                case_string: str) -> AgentResponse:
-        """Rounds 2-3: Text-only rebuttal — no image, argues from evidence."""
+    def respond(self, opponent_arg: AgentResponse, debate_history: list, case_string: str) -> AgentResponse:
         history_str = format_debate_history(debate_history)
-
-        rebuttal_context = f"""FORENSIC CASE FILE:
-{case_string}
-
-DEFENSE JUST ARGUED:
-Position: {opponent_arg.position} (confidence: {opponent_arg.confidence:.0%})
-Evidence: {json.dumps(opponent_arg.primary_evidence)}
-Challenge to you: {opponent_arg.challenge_to_opponent}
-Concessions they made: {opponent_arg.concessions}
-Summary: {opponent_arg.reasoning_summary}
-
-DEBATE HISTORY:
-{history_str}
-
-Respond to the defense's argument.
-- Challenge their specific points with forensic data
-- Present new evidence if available
-- Concede points they got right
-- Update your confidence based on the full debate so far"""
-
-        full_prompt = f"{PROSECUTION_PROMPT}\n\n{rebuttal_context}"
-
-        # Try Gemini first
-        text = self._gemini_text_call(full_prompt)
-
-        # Fallback to OpenRouter
-        if not text:
-            print("[Debate/Prosecution] Falling back to OpenRouter for rebuttal")
-            text = self._openrouter_call(rebuttal_context)
-
-        if text:
-            return parse_agent_json(text, "AI_GENERATED")
-        return AgentResponse("AI_GENERATED", 0.5, [], "", "",
-                             "Prosecution rebuttal failed (all providers failed)")
+        prompt = f"CASE FILE:\n{case_string}\n\nOPPONENT:\n{opponent_arg}\n\nHISTORY:\n{history_str}\n\nRefute based on evidence."
+        
+        text = self._call_groq(PROSECUTION_PROMPT, prompt, None)
+        if text: return parse_agent_json(text, "AI_GENERATED")
+        
+        print("[Prosecution] Falling back to Cerebras...")
+        text = self._call_cerebras(PROSECUTION_PROMPT, prompt, None)
+        if text: return parse_agent_json(text, "AI_GENERATED")
+        
+        return AgentResponse("AI_GENERATED", 0.0, [], "", "", "All providers failed")
