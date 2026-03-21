@@ -1,16 +1,5 @@
 """
 Layer 8: Watermark & Digital Signature Detection
-VERSION: 2.0 - Production Ready
-
-Gap Fixes:
-  [+] L8-1: Full-image watermark scan (all corners + center + tiled overlay)
-  [+] L8-2: AI logo template matching + OCR text detection (Midjourney grid, DALL-E, etc.)
-  [+] L8-3: Proper steganography detection (multi-band LSB + chi-square + DCT embedding)
-  [+] L8-4: Robust hash-based watermark detection (OpenAI C2PA-hash, Google SynthID-hash)
-  [+] L8-5: SynthID / Stable Signature spectral fingerprint detection
-  [+] L8-6: Calibrated thresholds (empirically derived, documented)
-
-Score range: -50 (strong AI watermark) to 0 (no watermark found)
 """
 
 import cv2

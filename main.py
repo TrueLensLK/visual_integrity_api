@@ -8,7 +8,7 @@ Layer 1:   Quick Forensic Triage (File Validation)
 Layer 2:   Metadata Analysis (EXIF/AI Signatures)
 Layer 3:   Physics Analysis (ELA/Noise)
 Layer 3.5: Face Consistency (Face vs Background)
-Layer 4:   Neural Network Ensemble (SDXL-Detector + ViT + SigLIP2 + ConvNeXt + Swin + TTA)
+Layer 4:   Neural Network Ensemble (SDXL-Detector + ViT + Ateeqq + ConvNeXt + Swin + TTA)
 Layer 5:   Master Judge (Weighted Multi-Layer Consensus)
 Layer 6:   Spectrum Analysis (FFT Frequency Domain)
 Layer 7:   Eye Reflection Physics (Optical Consistency)
@@ -71,7 +71,7 @@ except ImportError as e:
 # Import the new Case Builder and Modular Judge
 try:
        from Universal_Detector.src.layers.forensic_case_builder import compile_case_file
-       from Universal_Detector.src.layers.llm_judge import HybridJudge, LLMVerdict
+       from Universal_Detector.src.layers.llm_judge import HybridJudge, LLMVerdict, generate_user_description
        from Universal_Detector.src.layers.debate.models import OPENROUTER_VISION_MODELS
 except ImportError as e:
     print(f"CRITICAL: Missing core system modules (builder/judge/debate). {e}")
@@ -84,7 +84,8 @@ class DetectionResult:
     final_score: int  # 0-100 scale
     verdict: str  # "REAL", "AI-GENERATED", "AI-ENHANCED", or "EDITED"
     confidence: str  # "HIGH", "MEDIUM", "LOW"
-    description: str
+    technical_description: str
+    user_description: str
     layer_scores: Dict[str, float]
     layer_details: Dict[str, str]
     processing_time_ms: int
@@ -163,11 +164,23 @@ class AIImageDetector:
             
             processing_time = int((datetime.now() - start_time).total_seconds() * 1000)
             
+            technical_desc = f"Deterministic proof: C2PA Content Credentials confirm this is AI. ({reasons})"
+            user_desc = generate_user_description(
+                verdict="AI-GENERATED",
+                score=5,
+                technical_description=technical_desc,
+                judge_source="early-exit-c2pa",
+                is_web_sourced=False,
+                face_detected=False,
+                groq_client=None
+            )
+            
             return DetectionResult(
                 final_score=5,  # 5/100 indicates heavily Fake in your scale
                 verdict="AI-GENERATED",
                 confidence="HIGH",
-                description=f"Deterministic proof: C2PA Content Credentials confirm this is AI. ({reasons})",
+                technical_description=technical_desc,
+                user_description=user_desc,
                 layer_scores={"c2pa": -100.0},  # Massive penalty score
                 layer_details={"c2pa": c2pa_result.get("message")},
                 processing_time_ms=processing_time,
@@ -367,6 +380,28 @@ class AIImageDetector:
                         )
                      else:
                         self.log(f"  -> Keeping face_consistency ({fc_score}) - severe anomaly survives compression")
+
+             # Fix 2: LIKELY_WEB_SOURCED Zeroing (Watermark & Face)
+             elif origin_classification == "LIKELY_WEB_SOURCED":
+                 # Watermark > -50 on LIKELY_WEB is unreliable (mozjpeg dampening)
+                 if "watermark" in layer_scores and layer_scores["watermark"] <= -45: # Check strict threshold
+                     self.log(f"  -> Zeroing watermark ({layer_scores['watermark']}) - unreliable on LIKELY_WEB")
+                     layer_scores["watermark"] = 0.0
+                     layer_details["watermark"] = (
+                         "DISABLED | Score zeroed — strong watermark signal dampened by likely web compression. "
+                         "Unreliable evidence."
+                     )
+                 
+                 # Face Consistency in compression artifact range (-35 to -5)
+                 if "face_consistency" in layer_scores:
+                     fc_score = layer_scores["face_consistency"]
+                     if -35 <= fc_score <= -5:
+                        self.log(f"  -> Zeroing face_consistency ({fc_score}) - compression artifact risk")
+                        layer_scores["face_consistency"] = 0.0
+                        layer_details["face_consistency"] = (
+                            "DISABLED | Score zeroed — moderate face anomaly overlaps with "
+                            "compression artifacts on likely web image."
+                        )
              
              layer_details["origin"] = origin_classification
              
@@ -416,6 +451,17 @@ class AIImageDetector:
         llm_reasoning = None
         llm_obj = None  # Track LLM/Debate result for debate_data extraction
 
+        # Initial user description (Rule-based)
+        user_description = generate_user_description(
+            verdict=rule_based_verdict,
+            score=rule_based_score,
+            technical_description=rule_based_description,
+            judge_source="rule-based",
+            is_web_sourced=is_web_sourced,
+            face_detected=face_count > 0,
+            groq_client=None
+        )
+
         # ========================================
         # LLM FINAL BOSS
         # ========================================
@@ -443,7 +489,7 @@ class AIImageDetector:
 
                 # 2. Consult Hybrid Judge
                 self.log("Consulting LLM Judge for second opinion...", "INFO")
-                final_verdict, f_score, f_desc, llm_obj = self.hybrid_judge.judge(
+                final_verdict, f_score, f_desc, llm_obj, f_user_desc = self.hybrid_judge.judge(
                     case_file=case_file,
                     rule_based_verdict=rule_based_verdict,
                     rule_based_score=rule_based_score,
@@ -459,7 +505,9 @@ class AIImageDetector:
                         # Revert back to the mathematical rule-based scores
                         verdict = rule_based_verdict
                         final_score = rule_based_score
+                        # Keep technical description from rule based but append note
                         description = rule_based_description + f" [LLM override to {llm_obj.verdict} denied by Layer 5 Kill Switch]"
+                        # Keep rule-based user_description (already set)
                         judge_source = "hybrid (rule-enforced)"
                         llm_reasoning = llm_obj.reasoning
                     else:
@@ -468,6 +516,8 @@ class AIImageDetector:
                         verdict = final_verdict
                         final_score = f_score
                         description = f_desc
+                        user_description = f_user_desc # Update user description
+                        
                         is_debate = getattr(llm_obj, 'method', '') == 'adversarial_debate'
                         judge_source = "debate" if is_debate else "llm"
                         llm_reasoning = llm_obj.reasoning
@@ -498,7 +548,8 @@ class AIImageDetector:
             final_score=final_score,
             verdict=verdict,
             confidence=confidence,
-            description=description,
+            technical_description=description,
+            user_description=user_description,
             layer_scores=layer_scores,
             layer_details=layer_details,
             processing_time_ms=processing_time,
@@ -523,7 +574,7 @@ class AIImageDetector:
         return "LOW"
 
     def _create_error_result(self, msg: str, start_time: datetime) -> DetectionResult:
-        return DetectionResult(0, "ERROR", "N/A", msg, {}, {"error": msg}, 
+        return DetectionResult(0, "ERROR", "N/A", msg, msg, {}, {"error": msg}, 
                                int((datetime.now()-start_time).total_seconds()*1000), 
                                [msg], datetime.now().isoformat())
 
@@ -574,14 +625,14 @@ async def check_api_health():
     # Check Gemini
     gemini_key = os.getenv("GOOGLE_AI_API_KEY") or os.getenv("GEMINI_API_KEY")
     if gemini_key:
-        print(f"✅ Gemini API Key found: {gemini_key[:5]}...")
+        print(f"Gemini API Key found: {gemini_key[:5]}...")
     else:
-        print("❌ Gemini API Key MISSING")
+        print("Gemini API Key MISSING")
 
     # Check OpenRouter Fallback Chain
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     if openrouter_key:
-        print(f"✅ OpenRouter API Key found: {openrouter_key[:5]}...")
+        print(f"OpenRouter API Key found: {openrouter_key[:5]}...")
         print(f"   Configured Fallback Chain ({len(OPENROUTER_VISION_MODELS)} models):")
         for i, model in enumerate(OPENROUTER_VISION_MODELS):
             print(f"   {i+1}. {model}")
@@ -594,13 +645,13 @@ async def check_api_health():
                               headers={"Authorization": f"Bearer {openrouter_key}"}, 
                               timeout=2)  # Ultra-short timeout to prevent startup hang
             if resp.status_code == 200:
-                print("   ✅ OpenRouter Connectivity: OK")
+                print("   OpenRouter Connectivity: OK")
             else:
-                print(f"   ⚠️ OpenRouter Connectivity Check Failed: {resp.status_code}")
+                print(f"   OpenRouter Connectivity Check Failed: {resp.status_code}")
         except Exception as e:
-             print(f"   ⚠️ OpenRouter Connectivity Check Error: {e}")
+             print(f"   OpenRouter Connectivity Check Error: {e}")
     else:
-        print("❌ OpenRouter API Key MISSING - Debate/Defense agents will fail.")
+        print("OpenRouter API Key MISSING - Debate/Defense agents will fail.")
 
     print("[Startup] Health check complete.\n")
 

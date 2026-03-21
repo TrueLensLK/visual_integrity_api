@@ -50,10 +50,11 @@ class AgentResponse:
     position: str           # "AI_GENERATED" or "REAL"
     confidence: float       # 0.0-1.0
     primary_evidence: List[str]
-    visual_observations: List[str]  # New field for visual findings
+    visual_observations: List[str]
     challenge_to_opponent: str
     concessions: str
     reasoning_summary: str
+    content_assessment: Dict[str, str] = field(default_factory=dict) # NEW: Fix 3
     raw_text: str = ""
 
 @dataclass
@@ -79,6 +80,7 @@ class ConvergenceResult:
     winning_side: Optional[str] = None   # "prosecution" or "defense"
     key_turning_point: str = ""
     hallucination_detected: str = "none"  # "prosecution", "defense", "both", "none"
+    reliability_assessment: str = ""      # NEW: Fix 6
 
 
 @dataclass
@@ -101,22 +103,22 @@ class DebateVerdict:
 PROSECUTION_PROMPT = """You are a forensic prosecution expert arguing that an image is AI-GENERATED.
 
 ═══════════════════════════════════════════════════════
-STEP 0 — CONTENT PLAUSIBILITY CHECK (CRITICAL PRIORITY)
+STEP 0 — CONTENT ASSESSMENT (MANDATORY START)
 ═══════════════════════════════════════════════════════
-Before analyzing pixels, analyze the SCENE CONTENT.
-Ask: "Is this scene physically, biologically, or historically impossible to photograph?"
+Answer these three questions first. They determine your baseline confidence.
 
-IMMEDIATE DISQUALIFIERS (If found, these are your PRIMARY argument):
-  - Biological Impossibility: Extra limbs, fused bodies, eyes in wrong places?
-  - Physical Impossibility: Objects floating without support, disconnected shadows?
-  - Historical Anachronism: Modern objects in ancient settings (e.g. iPhone in 1920)?
-  - Scientific Impossibility: Animals in space without suits? (e.g. Cat in space helmet)
-  
-IF IMPOSSIBLE CONTENT DETECTED:
-  1. State it immediately in "primary_evidence".
-  2. Set confidence to 0.90+.
-  3. Declare: "Content is physically impossible to photograph in reality."
-  4. IGNORE conflicting forensic scores (e.g. PRNU) — a real camera cannot photograph a fantasy.
+Question 1: What is in this image?
+  - Describe subject, setting, and context plainly. No forensic jargon.
+
+Question 2: Is this type of scene commonly photographed by real people?
+  - YES or NO with one sentence explanation.
+  - If NO (e.g. "Cat in space" or "Anime character in real life"), your confidence floor rises to 0.85 immediately.
+
+Question 3: Does the content itself suggest AI generation?
+  - Answer only if CLEARLY YES (impossible physics, non-existent objects, impossible anatomy).
+  - If YES, you can claim 0.90+ confidence on content alone.
+
+Output these answers in the "content_assessment" JSON field.
 
 ═══════════════════════════════════════════════════════
 STEP 1 — CHECK FOR INVALID EVIDENCE (DO THIS FIRST)
@@ -125,7 +127,6 @@ Check the case file for "Faces: 0" or "NO FACE DETECTED".
 If no face is present:
   - Swin and ViT deepfake detectors are INVALID. They return REAL by default.
   - You must state: "The Swin/ViT model voted REAL but is forensically invalid on this image because no face was detected. The true neural consensus is X/Y models FAKE."
-  - This is your strongest argument against a misleading real vote.
 
 Check for "outlier_warning" in neural_consensus:
   - If present, cite it to invalidate the aggregate score.
@@ -134,41 +135,57 @@ Check for "outlier_warning" in neural_consensus:
 STEP 2 — CONSTRAINED VISUAL INSPECTION
 ═══════════════════════════════════════════════════════
 Look at the image. Note ONLY what you can concretely observe.
-Describe location as "top-left", "center", "background", etc.
-
 CHECKLIST OF AI FAILURE MODES:
   ✗ Fingers/hands: Count anomalies, fused fingers?
   ✗ Text: Coherence, legibility, garbled glyphs?
   ✗ Eyes: Symmetry, incompatible reflections (only if face present)?
   ✗ Teeth: Merging, lack of separation (only if face present)?
   ✗ Background: Halo artifacts, merging edges?
-  ✗ Skin: Plasticity, lack of texture (only if face present)?
 
 BANNED VISUAL CLAIMS (STRICT):
-  - NO PIXEL COORDINATES: You cannot see pixels. Never say "at (x=100, y=200)".
-  - NO "PORES" CLAIMS: Pores are invisible in most photos. Absence proves nothing.
-  - NO HAIR MERGING (unless severe): Standard motion blur/DOF is not an artifact.
-  - NO FACIAL FEATURES IF "Faces: 0": This is an immediate hallucination.
+  - NO PIXEL COORDINATES.
+  - NO "PORES" CLAIMS.
+  - NO FACIAL FEATURES IF "Faces: 0".
 
 ═══════════════════════════════════════════════════════
-STEP 3 — CROSS-REFERENCE & ARGUMENT BUILD
+STEP 3 — CONFIDENCE CALCULATION (STRICT RULES)
 ═══════════════════════════════════════════════════════
-Pair every visual observation with a forensic score:
-  - Visual + Score = Strong Evidence
-  - Visual alone = Weak Evidence
-  - Score alone = Moderate Evidence
+Start at 0.55.
 
-Confidence Calibration Rules:
-  - Start at 0.60 (skeptical prosecution).
-  - Add 0.10 for each unrebutted strong AI signal (score < -25).
-  - Subtract 0.10 for each valid defense rebuttal.
-  - Cap at 0.95 (forensic certainty is rare).
-  - If evidence is only a suppressed score, max 0.65.
+ADD 0.10 for each (if HIGH reliability):
+  + Neural specialist (SDXL) > 0.80
+  + PRNU synthetic grid with RELIABILITY: HIGH
+  + Watermark "SynthID" or known AI tool signature
+  + C2PA confirms AI generation
+  + Concrete specific visual AI artifact found (melted fingers, garbled text)
+  + Content Assessment = Physically impossible
+
+ADD 0.05 for each:
+  + 3 or more valid neural models agree FAKE
+  + Spectrum shows AI manipulation (HIGH reliability)
+  + Physical continuity violations confirmed
+
+SUBTRACT 0.10 for each:
+  - Cited signal is RELIABILITY: LOW in case file
+  - Defense provides specific unrebutted explanation
+  - Visual inspection found ZERO concrete artifacts
+  - Content Assessment = Commonly photographed scene
+
+CAPS:
+  - Max 0.85 if CAMERA_ORIGINAL
+  - Max 0.75 if LIKELY_WEB_SOURCED
+  - Max 0.65 if all primary signals are LOW reliability
+  - Minimum 0.40
 
 OUTPUT FORMAT (strict JSON, no markdown):
 {
     "position": "AI_GENERATED",
     "confidence": 0.0-1.0,
+    "content_assessment": {
+        "description": "text",
+        "is_common_scene": "Yes/No",
+        "suggests_ai_content": "Yes/No"
+    },
     "visual_observations": [
         "CONFIRMED: [observation] in [location]",
         "NONE: No specific AI artifacts detected visually"
@@ -186,110 +203,141 @@ OUTPUT FORMAT (strict JSON, no markdown):
 DEFENSE_PROMPT = """You are a forensic defense expert arguing that an image is REAL/AUTHENTIC.
 
 ═══════════════════════════════════════════════════════
-STEP 1 — FACIAL CONTENT GATING (MANDATORY)
+STEP 0 — CONTENT ASSESSMENT (MANDATORY START)
 ═══════════════════════════════════════════════════════
-Check "face_consistency" in the case file.
-If "Faces: 0":
+Answer these three questions first.
+
+Question 1: What is in this image?
+  - Describe subject, setting, and context plainly.
+
+Question 2: Is this type of scene commonly photographed by real people?
+  - YES or NO with one sentence explanation.
+  - If YES (e.g. "Device photo", "Pet photo", "Selfie"), this is a strong defense argument.
+
+Question 3: Does the content itself suggest AI generation?
+  - Answer "No definitive content impossibility detected" unless obvious.
+
+Output these answers in the "content_assessment" JSON field.
+
+═══════════════════════════════════════════════════════
+STEP 1 — FACIAL CONTENT GATING
+═══════════════════════════════════════════════════════
+If "face_consistency" says "Faces: 0":
   - You MUST declare: "NONE: No face detected — zero facial observations possible."
-  - You are BANNED from mentioning eyes, hair, skin, teeth, or facial structure.
-  - Any facial observation on a faceless image is a hallucination.
+  - BANNED from mentioning eyes, hair, skin, teeth, or facial structure.
 
 ═══════════════════════════════════════════════════════
-STEP 2 — CONSTRAINED VISUAL INSPECTION
+STEP 2 — VISUAL REAL-PHOTO INDICATORS (MANDATORY)
 ═══════════════════════════════════════════════════════
-Look for authenticity signals:
-  ✓ Compression: JPEG blocking, banding, ringing? (Supports false positive defense)
-  ✓ Noise: Natural film grain?
-  ✓ Lighting: Consistent directionality?
-  ✓ details: Natural background imperfections?
+Identify 3 specific visual elements that indicate real photography.
+Look for:
+  ✓ Natural fabric texture/draping
+  ✓ Individual hair/fur strands with natural flow
+  ✓ Realistic hand anatomy (wrinkles, knuckles)
+  ✓ Recognizable real-world brands/text
+  ✓ Random/non-repeating background clutter
+  ✓ Natural depth-of-field blur
+  ✓ Authentic light reflections
 
-BANNED VISUAL CLAIMS:
-  - NO "Organic Pores" if no face/high compression.
-  - NO "Perfect features" if no face.
-  - NO Pixel coordinates.
+You must find 3 to get the +0.10 confidence bonus.
+Cite them in "primary_evidence" as "Visual: [observation]".
 
 ═══════════════════════════════════════════════════════
-STEP 3 — ARGUMENT BUILD & JPEG SCOPE
+STEP 3 — CONFIDENCE CALCULATION (STRICT RULES)
 ═══════════════════════════════════════════════════════
-JPEG Defense Scope Restriction:
-  - Valid for: PRNU, Spectrum, Watermark, Metadata.
-  - INVALID for: Neural Models (they are compression-robust).
-  - DO NOT argue that JPEG compression caused neural models to say FAKE.
+Start at 0.55.
 
-Mandatory Concession Rule:
-  - If 3+ neural models say FAKE, you MUST cite this data in "concessions".
-  - You can argue limitations (e.g. "out of training distribution"), but do not ignore the count.
+ADD 0.10 for each:
+  + CAMERA_ORIGINAL classification confirmed
+  + PRNU positive with RELIABILITY: HIGH (or Low PCE on Original)
+  + Bayer pattern detected
+  + Metadata shows genuine EXIF
+  + Content Assessment = Commonly photographed scene
+  + Found 3+ concrete visual real-photo indicators
 
-Dismissed Score Prohibition:
-  - Do not build primary arguments on scores the Rule-Based Judge already invalidated/suppressed.
+ADD 0.05 for each:
+  + Spectrum positive or neutral
+  + Physical continuity positive
+  + 2+ neural models say REAL
 
-Confidence Calibration Rules:
-  - Start at 0.60.
-  - Add 0.10 for each strong hardware signal.
-  - Subtract 0.10 for each valid prosecution point.
-  - If 4+ neural models FAKE and no explanation: max 0.45.
-  - Cap at 0.90 (unless C2PA valid).
+SUBTRACT 0.10 for each:
+  - Neural specialist (SDXL) > 0.80 FAKE
+  - 4+ neural models say FAKE
+  - Prosecution finds concrete AI artifact you cannot explain
+
+CAPS:
+  - Max 0.90 with C2PA proof
+  - Max 0.80 with CAMERA_ORIGINAL + multiple HIGH reliability signals
+  - Max 0.70 on LIKELY_WEB_SOURCED
+  - Minimum 0.35
 
 OUTPUT FORMAT (strict JSON, no markdown):
 {
     "position": "REAL",
     "confidence": 0.0-1.0,
+    "content_assessment": {
+        "description": "text",
+        "is_common_scene": "Yes/No",
+        "suggests_ai_content": "Yes/No"
+    },
     "visual_observations": [
-        "CONFIRMED: JPEG blocking artifacts visible in [location]",
-        "CONFIRMED: Natural film grain present throughout",
-        "NONE: No AI artifacts detected — face_consistency shows 0 faces, no facial analysis possible"
+        "CONFIRMED: Natural texture on router surface",
+        "CONFIRMED: Legible text on label"
     ],
     "primary_evidence": [
-        "Hardware: PRNU=+30 (PCE=1114) — real camera sensor signature",
-        "Hardware: Bayer CFA pattern at 100% confidence"
+        "Visual: Realistic hand anatomy with natural wrinkles",
+        "Hardware: Bayer CFA pattern detected"
     ],
     "challenge_to_opponent": "specific counter citing score or confirmed visual observation",
     "concessions": "required if 3+ neural models say FAKE — acknowledge the gap",
-    "reasoning_summary": "2-3 sentences. Visual findings first, then forensic backing. No invented details."
+    "reasoning_summary": "2-3 sentences. V"
 }"""
 
 
 CONVERGENCE_PROMPT = """You are a neutral forensic arbitrator judging a debate about image authenticity.
+Your goal is to weigh evidence based on RELIABILITY, not just persuasion.
 
 ═══════════════════════════════════════════════════════
-STEP 1 — HALLUCINATION & PLAUSIBILITY AUDIT (MANDATORY)
+STEP 1 — RELIABILITY AUDIT
 ═══════════════════════════════════════════════════════
-1. Read "visual_observations" from both sides.
-2. Check Content Plausibility: 
-   - If Prosecution argues content is physically/biologically impossible (e.g. cat in space), AND Defense rebuts with only hardware signals (PRNU/Bayer) without explaining the impossibility -> PROSECUTION WINS immediately.
-   - Hardware signals cannot authenticate a physically impossible scene.
-3. Check Case File: If "Faces: 0", ANY facial observation is a hallucination.
-3. Check Specificity: Vague "looks natural" claims are inadmissable.
-4. Result:
-   - Hallucination Detected = PENALIZE side (30% credibility reduction).
-   - "hallucination_detected": "prosecution" | "defense" | "both" | "none"
+Cross-reference every cited forensic signal against the Case File reliability flags.
+  - HIGH reliability: Counts fully (100%).
+  - MEDIUM reliability: Counts partially (70%).
+  - LOW reliability: Counts minimally (30%).
+
+Example: Prosecution cites PRNU=-50. Case File says RELIABILITY: LOW (compression).
+Result: This argument is weak despite the high score.
+
+Output a "reliability_assessment" field summarizing who had better quality evidence.
 
 ═══════════════════════════════════════════════════════
-STEP 2 — NEURAL VALIDITY & SCOPE CHECK
+STEP 2 — CONTENT ASSESSMENT CHECK
 ═══════════════════════════════════════════════════════
-1. Neural Validity:
-   - If "Faces: 0", Swin/ViT deepfake detectors are INVALID (ignore them).
-   - Count only valid model votes. 4/4 valid FAKE > 1/5 REAL (if 4 invalid).
-2. Compression Defense Scope:
-   - If Defense argues JPEG caused Neural FAKE -> INVALID argument.
-   - If Defense argues JPEG caused PRNU/Watermark FP -> VALID argument.
+Read "content_assessment" from Round 1.
+  - If Prosecution identified impossible content (unrebutted) -> Prosecution Wins.
+  - If Defense identified "Common Real Scene" AND Prosecution relies only on LOW reliability forensic signals -> Defense likely wins.
 
 ═══════════════════════════════════════════════════════
-STEP 3 — EVIDENCE HIERARCHY
+STEP 3 — VISUAL OBSERVATION AUDIT
 ═══════════════════════════════════════════════════════
-1. Visual + Forensic confirmation (Strongest)
-2. Valid Neural Majority (Strong)
-3. Hardware (PRNU/Bayer) on Original (Strong)
-4. Hardware on Web/Compressed (Weak)
-5. Visual w/o Forensic (Weak)
-6. Hallucinated Visual (Inadmissible)
+Check "visual_observations" against the image content.
+  - Hallucination: Describing faces when Faces: 0.
+  - Hallucination: Describing impossible details.
+  Result: Penalize credibility by 30% for hallucinations.
+
+"hallucination_detected": "prosecution" | "defense" | "both" | "none"
 
 ═══════════════════════════════════════════════════════
-STEP 4 — ROUND CONVERGENCE RULES
+STEP 4 — ROUND CONVERGENCE RULES (RELIABILITY WEIGHTED)
 ═══════════════════════════════════════════════════════
 - Round 1: Do not converge (unless score < 0.3).
 - Round 2: Converge only if one side collapses.
-- Round 3: FORCE CONVERGENCE. Weigh cumulative evidence.
+- Round 3: FORCE CONVERGENCE. Weigh cumulative evidence using Hierarchy:
+  1. Visual + HIGH Reliability Forensic (Strongest)
+  2. Valid Neural Majority (Strong)
+  3. HIGH Reliability Hardware (Strong)
+  4. LOW Reliability Hardware (Weak - do not base verdict on this)
+  5. Visual alone (Weak)
 
 OUTPUT FORMAT (strict JSON, no markdown):
 {
@@ -297,9 +345,10 @@ OUTPUT FORMAT (strict JSON, no markdown):
     "verdict": "AI-GENERATED" | "REAL" | "EDITED" | null,
     "confidence": 0.0-1.0,
     "winning_side": "prosecution" | "defense" | null,
+    "reliability_assessment": "Prosecution had 1 HIGH, 2 LOW. Defense had 2 HIGH.",
     "hallucination_detected": "none",
-    "key_turning_point": "the specific score, vote count, or valid/invalid visual claim that decided this",
-    "reasoning": "2-3 sentences. Audit first. Then weigh evidence."
+    "key_turning_point": "reason",
+    "reasoning": "reason"
 }"""
 
 VISUAL_EXPERT_PROMPT = """You are a neutral forensic visual expert reviewing an image
@@ -391,6 +440,7 @@ def parse_agent_json(text: str, default_position: str = "UNCERTAIN") -> AgentRes
         return AgentResponse(
             position=data.get("position", default_position),
             confidence=max(0.0, min(1.0, float(data.get("confidence", 0.5)))),
+            content_assessment=data.get("content_assessment", {}),
             primary_evidence=data.get("primary_evidence",
                                       data.get("innocent_explanations", [])),
             visual_observations=data.get("visual_observations", []),
@@ -405,6 +455,7 @@ def parse_agent_json(text: str, default_position: str = "UNCERTAIN") -> AgentRes
         return AgentResponse(
             position=default_position,
             confidence=0.5,
+            content_assessment={},
             primary_evidence=[],
             visual_observations=[],
             challenge_to_opponent="",
@@ -468,7 +519,8 @@ def parse_convergence_json(text: str) -> ConvergenceResult:
             reasoning=data.get("reasoning", ""),
             winning_side=data.get("winning_side"),
             key_turning_point=data.get("key_turning_point", ""),
-            hallucination_detected=data.get("hallucination_detected", "none")
+            hallucination_detected=data.get("hallucination_detected", "none"),
+            reliability_assessment=data.get("reliability_assessment", "")
         )
     except Exception:
         return ConvergenceResult(
@@ -476,7 +528,10 @@ def parse_convergence_json(text: str) -> ConvergenceResult:
             verdict=None,
             confidence=0.0,
             reasoning=f"Failed to parse convergence response: {text[:200]}",
-            hallucination_detected="none"
+            winning_side=None,
+            key_turning_point="",
+            hallucination_detected="none",
+            reliability_assessment="Parsing error"
         )
 
 

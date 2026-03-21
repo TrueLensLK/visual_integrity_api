@@ -3,16 +3,6 @@ Debate System — Orchestrator
 Controls the adversarial debate flow: manages rounds, passes arguments between
 agents, and produces the final verdict.
 
-Architecture:
-  Prosecution (Gemini Vision)  → argues AI-GENERATED
-  Defense (OpenRouter Vision)  → argues REAL
-  Convergence (Groq text)      → neutral transcript reader → verdict
-
-Cost model:
-  Round 1:    2 vision calls (both agents see the image)
-  Rounds 2-3: 4 text-only calls (rebuttals from evidence, no image)
-  Per-round:  1 convergence call (Groq text, fast)
-  Total:      ~3x single LLM cost (not 8x)
 """
 
 import os

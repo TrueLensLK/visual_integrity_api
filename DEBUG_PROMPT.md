@@ -26,7 +26,7 @@ Layer 0  → C2PA Cryptographic Credentials (verify c2pa signatures)
 Layer 2  → Metadata Analysis (EXIF, AI signatures, timestamps)
 Layer 3  → Physics Analysis (ELA ghosting, noise texture, edges)
 Layer 3.5 → Face Consistency (face vs background noise, seam detection)
-Layer 4  → Neural Network Ensemble (SDXL-Detector + ViT + SigLIP2 + ConvNeXt + Swin with TTA)
+Layer 4  → Neural Network Ensemble (SDXL-Detector + ViT + Ateeqq + ConvNeXt + Swin with TTA)
 Layer 6  → Spectrum Analysis (FFT frequency domain, 7 sub-methods)
 Layer 7  → Eye Reflection Physics (corneal glint vector matching)
 Layer 8  → Watermark Detection (6 methods: visible, stego, hash, SynthID, FFT)
@@ -85,14 +85,14 @@ Final Boss → LLM single call (gray zone) OR Adversarial Debate (contradictions
 - **Models:**
   1. **SDXL Detector** — HuggingFace `Organika/sdxl-detector`, Stable Diffusion XL specific
   2. **ViT** — HuggingFace `prithivMLmods/Deep-Fake-Detector-v2-Model`, auto-detects fake label index
-  3. **SigLIP2** — HuggingFace `haywoodsloan/ai-image-detector-deploy`, CLIP-based
+  3. **Ateeqq** — HuggingFace `Ateeqq/ai-vs-human-image-detector`, Midjourney/DALL-E 3
   4. **ConvNeXt** — HuggingFace `umm-maybe/AI-image-detector`, modern CNN
   5. **Swin** — HuggingFace `microsoft/swin-tiny-patch4-window7-224`, hierarchical
-- **Ensemble weights:** SDXL=15%, ViT=25%, SigLIP=25%, ConvNeXt=20%, Swin=15%
+- **Ensemble weights:** SDXL=15%, ViT=15%, Ateeqq=22%, ConvNeXt=13%, Swin=15%, Deepfake=20% (if face)
 - **TTA:** 4 augmentations per model (original, H-flip, slight rotate, color jitter). Uses entropy of softmax outputs as uncertainty measure.
 - **Confidence dampening:** If `overall_conf < 0.3`, score is dampened toward 0.
 - **Model disagreement detection (G-4.2 fix):** When models differ by >25 points or have opposite signs → confidence penalized proportionally, `is_uncertain` forced True.
-- **Returns via `predict_visuals_detailed()`:** `{"impact": score, "confidence": 0-1, "is_uncertain": bool, "dampening": float, "raw_score": float, "sdxl": {...}, "vit": {...}, "siglip": {...}, "convnext": {...}, "swin": {...}}`
+- **Returns via `predict_visuals_detailed()`:** `{"impact": score, "confidence": 0-1, "is_uncertain": bool, "dampening": float, "raw_score": float, "sdxl": {...}, "vit": {...}, "ateeqq": {...}, "convnext": {...}, "swin": {...}}`
 - **Score range:** -50 to +50 (dampened)
 
 ### Layer 5: Master Judge v2.0

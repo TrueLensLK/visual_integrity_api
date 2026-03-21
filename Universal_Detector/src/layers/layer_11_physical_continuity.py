@@ -1,15 +1,5 @@
 """
 Layer 11: Physical Continuity Analysis (Geometric Truth)
-VERSION: 1.0
-
-AI generators excel at textures but fail at projective geometry.
-This layer detects violations of mathematical 3D space constraints.
-
-SUB-ANALYZERS:
-  11.1: Vanishing Point Coherence - Parallel lines must converge correctly
-  11.2: Multi-Object Shadow Vectors - Multiple shadows must share light source
-
-SCORING: -50 (impossible physics) to +30 (consistent geometry)
 """
 
 import cv2

@@ -343,6 +343,135 @@ class ForensicAgent:
             elif "AI" in text.upper(): verdict = "AI-GENERATED"
             return {"verdict": verdict, "confidence": 0.5, "reasoning": "JSON Parse Failed. Raw text extraction."}
 
+def _check_two_model_agreement(case_file: Dict[str, Any]) -> Optional[Tuple[str, int, str, LLMVerdict]]:
+    """
+    Fast-path verdict logic: Checks if SDXL and Ateeqq agree with high confidence (>0.80).
+    Returns (verdict, score, description, mock_llm_verdict) if agreement found, else None.
+    """
+    breakdown = case_file.get("neural_consensus", {}).get("model_breakdown", {})
+    sdxl = breakdown.get("sdxl", {})
+    ateeqq = breakdown.get("ateeqq", {})
+    
+    sdxl_score = sdxl.get("score", 0)
+    sdxl_conf = sdxl.get("confidence", 0)
+    ateeqq_score = ateeqq.get("score", 0)
+    ateeqq_conf = ateeqq.get("confidence", 0)
+    
+    CONF_THRESH = 0.80
+    
+    # Case 1: Both Agree AI Above 80% Confidence
+    if sdxl_score < -30 and sdxl_conf > CONF_THRESH and ateeqq_score < -30 and ateeqq_conf > CONF_THRESH:
+        avg_conf = (sdxl_conf + ateeqq_conf) / 2
+        # Map 0.80-1.0 to approx 15-20 score (AI range)
+        final_score = int(20 - (avg_conf - 0.80) * 50) 
+        final_score = max(0, min(25, final_score)) # Clamp to AI zone
+        
+        desc = (f"Fast-Path: Two specialist models (SDXL & Ateeqq) independently agreed on AI origin "
+                f"with high confidence (Avg: {avg_conf:.1%}). SDXL detected diffusion artifacts; "
+                f"Ateeqq detected generative patterns.")
+        
+        mock_res = LLMVerdict(
+            verdict="AI-GENERATED",
+            confidence=avg_conf,
+            reasoning=desc,
+            key_evidence=["SDXL High Confidence AI", "Ateeqq High Confidence AI"],
+            contradictions_resolved=[],
+            source="neural_agreement_fastpath",
+            processing_time_ms=0
+        )
+        return "AI-GENERATED", final_score, desc, mock_res
+
+    # Case 2: Both Agree REAL Above 80% Confidence
+    if sdxl_score > 30 and sdxl_conf > CONF_THRESH and ateeqq_score > 30 and ateeqq_conf > CONF_THRESH:
+        final_score = 72 # Capped at 72 as per specification
+        avg_conf = (sdxl_conf + ateeqq_conf) / 2
+        
+        desc = (f"Fast-Path: Two specialist models (SDXL & Ateeqq) independently agreed on REAL origin "
+                f"with high confidence (Avg: {avg_conf:.1%}). No specific AI artifacts detected.")
+                
+        mock_res = LLMVerdict(
+            verdict="LIKELY_REAL",
+            confidence=avg_conf,
+            reasoning=desc,
+            key_evidence=["SDXL High Confidence REAL", "Ateeqq High Confidence REAL"],
+            contradictions_resolved=[],
+            source="neural_agreement_fastpath",
+            processing_time_ms=0
+        )
+        return "LIKELY_REAL", final_score, desc, mock_res
+        
+    return None
+
+def _resolve_conflict_fallback(case_file: Dict[str, Any], rule_based_score: int) -> Tuple[str, int, str]:
+    """
+    Fallback conflict resolution when LLMs fail.
+    Implements Case 3 (Conflict) logic.
+    """
+    breakdown = case_file.get("neural_consensus", {}).get("model_breakdown", {})
+    sdxl = breakdown.get("sdxl", {})
+    ateeqq = breakdown.get("ateeqq", {})
+    vit = breakdown.get("vit", {})
+    convnext = breakdown.get("convnext", {})
+    
+    sdxl_score = sdxl.get("score", 0)
+    sdxl_conf = sdxl.get("confidence", 0)
+    ateeqq_score = ateeqq.get("score", 0)
+    ateeqq_conf = ateeqq.get("confidence", 0)
+    
+    # Calculate Weighted Signals
+    sdxl_weighted = abs(sdxl_score * sdxl_conf)
+    ateeqq_weighted = abs(ateeqq_score * ateeqq_conf)
+    
+    # Case 3 Step 1: Dominant Confidence (>1.5x)
+    winner = None
+    # Ensure signal is strong enough (>5) to count as dominant, avoiding noise
+    if sdxl_weighted > 1.5 * ateeqq_weighted and sdxl_weighted > 5: 
+        winner = ("SDXL", sdxl_score, sdxl_conf)
+    elif ateeqq_weighted > 1.5 * sdxl_weighted and ateeqq_weighted > 5:
+        winner = ("Ateeqq", ateeqq_score, ateeqq_conf)
+        
+    if winner:
+        name, score, conf = winner
+        penalized_conf = conf * 0.75
+        
+        verdict = "LIKELY_REAL" if score > 0 else "LIKELY_AI_GENERATED"
+        # Map Score: 0-100 scale.
+        final_score = 50 + (penalized_conf * 50) if score > 0 else 50 - (penalized_conf * 50)
+        final_score = int(max(0, min(100, final_score)))
+        
+        desc = (f"[Fallback] Conflict Resolution: {name} dominant ({conf:.0%}). "
+                f"Confidence penalized to {penalized_conf:.1%} due to specialist conflict.")
+        return verdict, final_score, desc
+
+    # Case 3 Step 2: Tiebreakers (ViT & ConvNeXt)
+    tiebreakers = []
+    if vit: tiebreakers.append(vit.get("score", 0))
+    if convnext: tiebreakers.append(convnext.get("score", 0))
+    
+    if tiebreakers:
+        ai_votes = sum(1 for s in tiebreakers if s < -10)
+        real_votes = sum(1 for s in tiebreakers if s > 10)
+        
+        direction = None
+        # Strict majority (needs >50% of available tiebreakers)
+        if ai_votes > real_votes and ai_votes >= len(tiebreakers)/2:
+             direction = "AI"
+        elif real_votes > ai_votes and real_votes >= len(tiebreakers)/2:
+             direction = "REAL"
+             
+        if direction:
+             conf = 0.55
+             verdict = "LIKELY_AI_GENERATED" if direction == "AI" else "LIKELY_REAL"
+             final_score = 50 - (conf * 50) if direction == "AI" else 50 + (conf * 50)
+             final_score = int(final_score)
+             desc = (f"[Fallback] Conflict Resolution: Tiebreakers ({ai_votes} AI vs {real_votes} Real) "
+                     f"resolved the deadlock at low confidence.")
+             return verdict, final_score, desc
+
+    # Case 3 Step 3: Honest UNCERTAIN
+    return "UNCERTAIN", 50, "[Fallback] Neural Conflict Unresolved (No dominant model or tiebreaker consensus)."
+
+
 class HybridJudge:
     """
     Orchestrates Rule-Based, LLM-Based, and Adversarial Debate judging.
@@ -473,18 +602,35 @@ class HybridJudge:
         rule_based_score: int,
         rule_based_description: str,
         image_path: Optional[str] = None
-    ) -> Tuple[str, int, str, Optional[LLMVerdict]]:
+    ) -> Tuple[str, int, str, Optional[LLMVerdict], str]:
         
-        # ── Phase 0: Visual Expert Check (UNCERTAIN Web Images) ──
-        # Fix 15: If Rule-Based says UNCERTAIN on a Web Image, route to Visual Expert
+        # ── Pre-Check: Web Sourced Detection ──
         is_web_sourced = False
-        # Check if evidence mentions "web-sourced" (from Fix 5 disable message)
         all_evidence = case_file.get("all_evidence", [])
         for item in all_evidence:
             if "web-sourced" in str(item.get("detail", "")).lower():
                 is_web_sourced = True
                 break
+
+        # ── Phase -1: Two-Model Agreement Fast-Path ──
+        # Check if SDXL and Ateeqq agree with high confidence (>0.80)
+        # This replaces the need for debate/LLM on clear cases.
+        agreement = _check_two_model_agreement(case_file)
+        if agreement:
+            print(f"[HybridJudge] Fast-Path Agreement: {agreement[0]} (Score: {agreement[1]})")
+            user_desc = generate_user_description(
+                verdict=agreement[0],
+                score=agreement[1],
+                technical_description=agreement[2],
+                judge_source="neural-fast-path",
+                is_web_sourced=is_web_sourced,
+                face_detected=case_file.get("face_count", 0) > 0,
+                groq_client=None
+            )
+            return agreement[0], agreement[1], agreement[2], agreement[3], user_desc
         
+        # ── Phase 0: Visual Expert Check (UNCERTAIN Web Images) ──
+        # Fix 15: If Rule-Based says UNCERTAIN on a Web Image, route to Visual Expert
         if is_web_sourced and rule_based_verdict == "UNCERTAIN" and self.visual_expert and image_path:
             print(f"[HybridJudge] UNCERTAIN web image detected → Routing to Visual Expert")
             
@@ -524,7 +670,18 @@ class HybridJudge:
                 raw_response=expert_result.raw_text
             )
             
-            return verdict, final_score, description, llm_verdict
+            # Generate user-friendly description
+            user_desc = generate_user_description(
+                verdict=verdict,
+                score=final_score,
+                technical_description=description,
+                judge_source="visual-expert",
+                is_web_sourced=is_web_sourced,
+                face_detected=case_file.get("face_count", 0) > 0,
+                groq_client=self.agent._groq_client if self.agent else None
+            )
+
+            return verdict, final_score, description, llm_verdict, user_desc
 
         # ── Phase 1: Adversarial Debate for genuine contradictions ──
         if self.debate and image_path:
@@ -559,7 +716,15 @@ class HybridJudge:
                                 print(f"    Rule-based: {rule_based_verdict} ({rule_based_score}/100)")
                                 print(f"    Reason: Rule-based identified false positive; debate confidence too low")
                                 print(f"    → Keeping rule-based verdict")
-                                return rule_based_verdict, rule_based_score, rule_based_description, None
+                                
+                                user_desc = generate_user_description(
+                                    rule_based_verdict, rule_based_score, rule_based_description,
+                                    "rule-based (override blocked)", is_web_sourced,
+                                    case_file.get("face_count", 0) > 0,
+                                    self.agent._groq_client if self.agent else None
+                                )
+
+                                return rule_based_verdict, rule_based_score, rule_based_description, None, user_desc
 
                         # Debate reached a definitive verdict
                         if debate_result.verdict == "REAL":
@@ -569,7 +734,15 @@ class HybridJudge:
                         else:
                             final_score = 50
                         final_description = f"[Debate] {debate_result.reasoning}"
-                        return debate_result.verdict, final_score, final_description, debate_result
+                        
+                        user_desc = generate_user_description(
+                            debate_result.verdict, final_score, final_description,
+                            "adversarial_debate", is_web_sourced,
+                            case_file.get("face_count", 0) > 0,
+                            self.agent._groq_client if self.agent else None
+                        )
+                        
+                        return debate_result.verdict, final_score, final_description, debate_result, user_desc
                     else:
                         print("[HybridJudge] Debate inconclusive → falling back to single LLM")
                 except Exception as e:
@@ -580,7 +753,13 @@ class HybridJudge:
         
         # If no LLM needed, return Rule-Based
         if not self.enable_llm or not should_run:
-            return rule_based_verdict, rule_based_score, rule_based_description, None
+            user_desc = generate_user_description(
+                rule_based_verdict, rule_based_score, rule_based_description,
+                "rule-based", is_web_sourced,
+                case_file.get("face_count", 0) > 0,
+                self.agent._groq_client if self.agent else None
+            )
+            return rule_based_verdict, rule_based_score, rule_based_description, None, user_desc
 
         # Add instructions and run single LLM
         if instruction:
@@ -590,20 +769,20 @@ class HybridJudge:
         
         # ── Safety Net: If ALL LLM providers failed, fall back to rule-based ──
         if llm_result.source == "llm_error":
-            print(f"[HybridJudge] All LLM providers failed → falling back to rule-based verdict")
+            print(f"[HybridJudge] All LLM providers failed → falling back to neural conflict resolution")
             
-            # Fix 18: Fallback to SDXL on LLM Error (Uncertain fallback)
-            sdxl_data = case_file.get("neural_consensus", {}).get("model_breakdown", {}).get("sdxl")
-            if sdxl_data:
-                sdxl_score = sdxl_data.get("score", 0)
-                if sdxl_score > 0:
-                   print(f"[HybridJudge] LIKELY_REAL override via SDXL (score={sdxl_score:+.1f})")
-                   return "LIKELY_REAL", 60, f"[LLM FAIL] Fallback to SDXL-Detector (REAL)", None
-                else:
-                   print(f"[HybridJudge] LIKELY_AI_GENERATED override via SDXL (score={sdxl_score:+.1f})")
-                   return "LIKELY_AI_GENERATED", 35, f"[LLM FAIL] Fallback to SDXL-Detector (AI)", None
+            # Fix 18: Fallback Conflict Resolution (Case 3 & 4)
+            # Replaced broken SDXL-only fallback with robust Case 3 logic
+            fb_verdict, fb_score, fb_desc = _resolve_conflict_fallback(case_file, rule_based_score)
             
-            return rule_based_verdict, rule_based_score, f"[LLM Unavailable] {rule_based_description}", None
+            user_desc = generate_user_description(
+                fb_verdict, fb_score, fb_desc,
+                "rule-based (fallback)", is_web_sourced,
+                case_file.get("face_count", 0) > 0,
+                self.agent._groq_client if self.agent else None
+            )
+            
+            return fb_verdict, fb_score, fb_desc, None, user_desc
         
         # ── Guardrail: LLM vs Rule-Based conflict ──
         # If rule-based judge corrected a false positive (e.g., Bayer contradiction,
@@ -627,7 +806,18 @@ class HybridJudge:
                 print(f"    Rule-based: {rule_based_verdict} ({rule_based_score}/100)")
                 print(f"    Reason: Rule-based identified false positive; LLM used dismissed evidence")
                 print(f"    → Keeping rule-based verdict")
-                return rule_based_verdict, rule_based_score, rule_based_description, None
+                
+                # Generate user-friendly description
+                user_desc = generate_user_description(
+                    verdict=rule_based_verdict,
+                    score=rule_based_score,
+                    technical_description=rule_based_description,
+                    judge_source="rule-based (override blocked)",
+                    is_web_sourced=is_web_sourced,
+                    face_detected=case_file.get("face_count", 0) > 0,
+                    groq_client=self.agent._groq_client if self.agent else None
+                )
+                return rule_based_verdict, rule_based_score, rule_based_description, None, user_desc
 
         # Calculate Final Score based on LLM Confidence
         final_description = f"[LLM] {llm_result.reasoning}"
@@ -637,24 +827,115 @@ class HybridJudge:
         elif final_verdict == "AI-GENERATED":
             final_score = 50 - int(llm_result.confidence * 50)
         
-        # ── Fix 18: Fallback to SDXL on UNCERTAIN ──
+        # ── Fix 18: Fallback to Neural Conflict on UNCERTAIN ──
         elif final_verdict == "UNCERTAIN" or final_verdict == "EDITED":
-            sdxl_data = case_file.get("neural_consensus", {}).get("model_breakdown", {}).get("sdxl")
-            if sdxl_data:
-                sdxl_score = sdxl_data.get("score", 0)
-                if sdxl_score > 0:
-                    print(f"[HybridJudge] LIKELY_REAL override via SDXL (score={sdxl_score:+.1f})")
-                    return "LIKELY_REAL", 60, f"[Fallback] LLM Uncertain -> SDXL says REAL ({sdxl_score:+.1f})", llm_result
-                else:
-                    print(f"[HybridJudge] LIKELY_AI_GENERATED override via SDXL (score={sdxl_score:+.1f})")
-                    return "LIKELY_AI_GENERATED", 35, f"[Fallback] LLM Uncertain -> SDXL says AI ({sdxl_score:+.1f})", llm_result
-            else:
-                final_score = 50
+             # If LLM is uncertain, use Case 3 conflict resolution
+             fb_verdict, fb_score, fb_desc = _resolve_conflict_fallback(case_file, final_score if 'final_score' in locals() else 50)
+             final_score = fb_score
+             final_verdict = fb_verdict
+             final_description = f"[Fallback] LLM Uncertain -> {fb_desc}"
 
         else:
             final_score = 50
 
-        return final_verdict, final_score, final_description, llm_result
+        # Generate user-friendly description
+        user_desc = generate_user_description(
+            verdict=final_verdict,
+            score=final_score,
+            technical_description=final_description,
+            judge_source="llm",
+            is_web_sourced=is_web_sourced,
+            face_detected=case_file.get("face_count", 0) > 0,
+            groq_client=self.agent._groq_client if self.agent else None
+        )
+
+        return final_verdict, final_score, final_description, llm_result, user_desc
+
+def generate_user_description(
+    verdict: str,
+    score: int,
+    technical_description: str,
+    judge_source: str,
+    is_web_sourced: bool,
+    face_detected: bool,
+    groq_client: Any
+) -> str:
+    """
+    Generates a clear, non-technical explanation of the findings for end users.
+    Uses LLM with fallback to template-based generation.
+    """
+    # 1. Map Score to Confidence Phrase
+    if 0 <= score <= 15: conf_phrase = "very high confidence AI"
+    elif 16 <= score <= 30: conf_phrase = "moderately high confidence AI"
+    elif 31 <= score <= 48: conf_phrase = "slight lean toward AI"
+    elif 49 <= score <= 55: conf_phrase = "genuinely uncertain"
+    elif 56 <= score <= 69: conf_phrase = "slight lean toward authentic"
+    elif 70 <= score <= 82: conf_phrase = "moderately confident authentic"
+    else: conf_phrase = "very high confidence authentic"
+    
+    # 2. Extract Plain-Language Summary from Technical Description
+    td_lower = technical_description.lower()
+    plain_summary = "We detected mixed signals requiring expert review."
+    
+    if "kill switch" in td_lower:
+        plain_summary = "Our safety systems caught a known fake pattern that neural networks might miss."
+    elif "sdxl" in td_lower and "ateeqq" in td_lower and "agree" in td_lower:
+        plain_summary = "Multiple specialized AI detectors independently agreed on the verdict."
+    elif "visual expert" in td_lower and "impossible" in td_lower:
+        plain_summary = "Visual analysis revealed physically impossible lighting or geometry."
+    elif "visual expert" in td_lower and "real photography" in td_lower:
+        plain_summary = "The image contains subtle details consistent with genuine high-end photography."
+    elif "hardware veto" in td_lower:
+        plain_summary = "The image's invisible digital fingerprint matches a real camera sensor."
+    elif "model consensus" in td_lower:
+        plain_summary = "Our ensemble of 5 neural network models reached a majority decision."
+        
+    # 3. LLM User Description Generation
+    banned_words = ["prnu", "spectrum", "bayer", "artifacts", "fft", "frequency", "metadata", "c2pa", "tensor", "logits"]
+    
+    if groq_client:
+        try:
+            system_msg = "You are a helpful assistant rewriting technical forensic reports into one plain English sentence for a non-technical user."
+            prompt = (
+                f"Verdict: {verdict} ({conf_phrase})\n"
+                f"Technical: {technical_description}\n"
+                f"Source: {judge_source}\n"
+                f"Web Sourced: {is_web_sourced}\n"
+                f"Face Detected: {face_detected}\n\n"
+                f"Task: Write ONE sentence explaining why this verdict was reached. \n"
+                f"Rules: No jargon ({', '.join(banned_words)}). Be direct. Use 'The system detecting...' or 'Analysis shows...'.\n"
+            )
+            
+            completion = groq_client.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct", # As requested
+                messages=[
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=120
+            )
+            
+            response = completion.choices[0].message.content.strip()
+            
+            # Check for banned words
+            if not any(bw in response.lower() for bw in banned_words):
+                return response
+                
+        except Exception:
+            pass # Fallthrough to Step 4
+            
+    # 4. Fallback Template Generation
+    TEMPLATES = {
+        "AI-GENERATED": f"Analysis indicates with {conf_phrase} that this image is AI-generated. {plain_summary}",
+        "LIKELY_AI_GENERATED": f"The system leans toward AI-generated ({conf_phrase}). {plain_summary}",
+        "REAL": f"Analysis indicates with {conf_phrase} that this image is authentic. {plain_summary}",
+        "LIKELY_REAL": f"The system leans toward authentic ({conf_phrase}). {plain_summary}",
+        "EDITED": f"This image appears to be a Real photo that has been edited. {plain_summary}",
+        "uncertain": f"The results are inconclusive ({conf_phrase}). {plain_summary}"
+    }
+    
+    return TEMPLATES.get(verdict, TEMPLATES["uncertain"])
 
 def create_judge(enable_llm: bool = True, **kwargs) -> HybridJudge:
     return HybridJudge(enable_llm=enable_llm, **kwargs)

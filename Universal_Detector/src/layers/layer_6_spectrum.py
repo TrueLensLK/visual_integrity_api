@@ -1,20 +1,7 @@
 """
-Layer 6: Frequency Domain Forensics (FFT) - COMPLETE VERSION
-Fixes all 7 identified gaps + ultra-conservative for web images
+Layer 6: Frequency Domain Forensics (FFT) 
 
-VERSION: 2.0 - Production Ready
-DATE: February 2026
 
-IMPROVEMENTS:
-[+] L6-1: Multi-band analysis (R,G,B + Y,Cb,Cr channels)
-[+] L6-2: Windowing function (Hann/Hamming to reduce edge artifacts)
-[+] L6-3: Directional spectrum analysis (detects axis-aligned grids)
-[+] L6-4: Patch-based FFT (detects local manipulation)
-[+] L6-5: Advanced JPEG detection (multiple encoder signatures)
-[+] L6-6: GAN checkerboard detection (transposed convolution artifacts)
-[+] L6-7: AI upsampling pattern detection (Real-ESRGAN, Topaz, etc.)
-
-SCORING: -50 (Strong AI) to +35 (Natural)
 """
 
 import numpy as np

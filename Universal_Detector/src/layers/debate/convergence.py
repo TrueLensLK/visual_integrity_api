@@ -182,6 +182,15 @@ Deliver your judgment."""
             if "prosecution" in entry:
                 p = entry["prosecution"]
                 transcript.append(f"PROSECUTION: {p.position} ({p.confidence:.0%})")
+                
+                if hasattr(p, 'content_assessment') and p.content_assessment:
+                    transcript.append("Content Assessment:")
+                    for k, v in p.content_assessment.items():
+                        transcript.append(f"  - {k}: {v}")
+
+                if hasattr(p, 'visual_observations') and p.visual_observations:
+                    transcript.append(f"Visual Observations: {', '.join(p.visual_observations)}")
+                
                 transcript.append(f"Argument: {p.reasoning_summary}")
                 transcript.append(f"Key Evidence: {', '.join(p.primary_evidence)}")
                 transcript.append("")
@@ -189,6 +198,15 @@ Deliver your judgment."""
             if "defense" in entry:
                 d = entry["defense"]
                 transcript.append(f"DEFENSE: {d.position} ({d.confidence:.0%})")
+                
+                if hasattr(d, 'content_assessment') and d.content_assessment:
+                    transcript.append("Content Assessment:")
+                    for k, v in d.content_assessment.items():
+                        transcript.append(f"  - {k}: {v}")
+                
+                if hasattr(d, 'visual_observations') and d.visual_observations:
+                    transcript.append(f"Visual Observations: {', '.join(d.visual_observations)}")
+
                 transcript.append(f"Argument: {d.reasoning_summary}")
                 transcript.append(f"Key Evidence: {', '.join(d.primary_evidence)}")
                 transcript.append("")
