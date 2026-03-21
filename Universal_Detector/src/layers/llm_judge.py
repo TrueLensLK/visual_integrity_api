@@ -653,6 +653,10 @@ class HybridJudge:
                 final_score = 72
                 description = f"[Visual Expert] {description} (Score capped at 72 due to missing hardware forensics)"
                 
+            elif verdict == "EDITED_REAL":
+                 final_score = 60
+                 description = f"[Visual Expert] {description} (Identified as heavy retouching, not AI)"
+
             else: # UNCERTAIN
                 final_score = 50
                 verdict = "UNCERTAIN"
@@ -864,14 +868,18 @@ def generate_user_description(
     Generates a clear, non-technical explanation of the findings for end users.
     Uses LLM with fallback to template-based generation.
     """
-    # 1. Map Score to Confidence Phrase
-    if 0 <= score <= 15: conf_phrase = "very high confidence AI"
-    elif 16 <= score <= 30: conf_phrase = "moderately high confidence AI"
-    elif 31 <= score <= 48: conf_phrase = "slight lean toward AI"
-    elif 49 <= score <= 55: conf_phrase = "genuinely uncertain"
-    elif 56 <= score <= 69: conf_phrase = "slight lean toward authentic"
-    elif 70 <= score <= 82: conf_phrase = "moderately confident authentic"
+    # 1. Map Score to Confidence Phrase (Updated Change 3)
+    if score <= 20: conf_phrase = "very high confidence AI"
+    elif score <= 40: conf_phrase = "moderately high confidence AI"
+    elif score <= 55: conf_phrase = "uncertain / inconclusive"
+    elif score <= 65: conf_phrase = "heavy retouching detected"
+    elif score <= 75: conf_phrase = "moderately confident authentic"
+    elif score <= 89: conf_phrase = "high confidence authentic"
     else: conf_phrase = "very high confidence authentic"
+
+    # Check for EDITED_REAL specific override
+    if verdict == "EDITED_REAL" or (verdict in ["REAL", "LIKELY_REAL"] and 56 <= score <= 65):
+        return "This image appears to be a Real photo that has been heavily retouched (e.g. Photoshop/Filters), but is not AI generated."
     
     # 2. Extract Plain-Language Summary from Technical Description
     td_lower = technical_description.lower()
@@ -931,6 +939,7 @@ def generate_user_description(
         "LIKELY_AI_GENERATED": f"The system leans toward AI-generated ({conf_phrase}). {plain_summary}",
         "REAL": f"Analysis indicates with {conf_phrase} that this image is authentic. {plain_summary}",
         "LIKELY_REAL": f"The system leans toward authentic ({conf_phrase}). {plain_summary}",
+        "EDITED_REAL": "This image appears to be a Real photo that has been heavily retouched (e.g. Photoshop/Filters), but is not AI generated.",
         "EDITED": f"This image appears to be a Real photo that has been edited. {plain_summary}",
         "uncertain": f"The results are inconclusive ({conf_phrase}). {plain_summary}"
     }

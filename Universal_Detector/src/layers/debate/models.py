@@ -60,12 +60,13 @@ class AgentResponse:
 @dataclass
 class VisualExpertResponse:
     """Structured response from the Visual Expert Agent."""
-    verdict: str                # "AI-GENERATED", "LIKELY_REAL", "UNCERTAIN"
-    confidence: float           # 0.0-0.80
+    verdict: str                # "AI-GENERATED", "LIKELY_REAL", "UNCERTAIN", "EDITED_REAL"
+    confidence: float           # 0.0-1.0
     definitive_artifacts_found: List[str]
     definitive_real_indicators: List[str]
     reasoning: str
     honest_assessment: str
+    editing_signs: List[str] = field(default_factory=list)
     raw_text: str = ""
 
 
@@ -380,24 +381,31 @@ LOOK FOR THESE SPECIFIC THINGS IN THIS ORDER:
    - Natural imperfections (motion blur, lens distortion, chromatic aberration)
    - Background details that are complex and non-repeating
 
-3. NEITHER FOUND → UNCERTAIN:
-   If you cannot find concrete evidence in either category above,
+3. HEAVY RETOUCHING (if found → EDITED_REAL):
+   - Skin smoothing that removes pores but leaves structure intact
+   - Color grading that looks stylized but consistent
+   - Objects removed or added cleanly (e.g. in Photoshop)
+   - This is common in professional photography (magazines, weddings)
+   - Do NOT classify this as AI relative to generative artifacts.
+   - Verdict: EDITED_REAL
+
+4. NEITHER FOUND → UNCERTAIN:
+   If you cannot find concrete evidence in above categories,
    the correct answer is UNCERTAIN. Do not invent artifacts.
-   Do not describe general impressions like "skin looks plastic."
-   Only concrete, specific, locatable observations count.
 
 CONFIDENCE RULES (strict):
-   Found definitive AI artifact: max confidence 0.80 (LIKELY_AI_GENERATED)
-   Found definitive real indicator only: max confidence 0.70 (LIKELY_REAL)
+   Found definitive AI artifact: max confidence 0.95 (LIKELY_AI_GENERATED)
+   Found complex retouching: max confidence 0.65 (EDITED_REAL)
+   Found definitive real indicator only: max confidence 0.85 (LIKELY_REAL)
    Found neither: confidence must be 0.50, verdict UNCERTAIN
-   Never exceed 0.80 on a web-sourced image — hardware evidence missing
 
 OUTPUT FORMAT:
 {
-    "verdict": "LIKELY_AI_GENERATED" or "LIKELY_REAL" or "UNCERTAIN",
-    "confidence": 0.0-0.80,
+    "verdict": "LIKELY_AI_GENERATED" or "LIKELY_REAL" or "EDITED_REAL" or "UNCERTAIN",
+    "confidence": 0.0-1.0,
     "definitive_artifacts_found": ["specific artifact at specific location"] or [],
     "definitive_real_indicators": ["specific indicator at specific location"] or [],
+    "editing_signs": ["smooth skin", "color grade"] or [],
     "reasoning": "2-3 sentences. What did you specifically see or not see?",
     "honest_assessment": "one sentence stating your actual confidence level and what would change your answer"
 }"""
@@ -478,14 +486,15 @@ def parse_visual_expert_json(text: str) -> VisualExpertResponse:
             
         verdict = data.get("verdict", "UNCERTAIN")
         # Allow new verdicts "LIKELY_AI_GENERATED" and "LIKELY_REAL", plus old ones for fallback
-        if verdict not in ["AI-GENERATED", "LIKELY_AI_GENERATED", "LIKELY_REAL", "REAL", "UNCERTAIN"]:
+        if verdict not in ["AI-GENERATED", "LIKELY_AI_GENERATED", "LIKELY_REAL", "REAL", "UNCERTAIN", "EDITED_REAL"]:
             verdict = "UNCERTAIN"
             
         return VisualExpertResponse(
             verdict=verdict,
-            confidence=max(0.0, min(0.8, float(data.get("confidence", 0.5)))),
+            confidence=max(0.0, min(1.0, float(data.get("confidence", 0.5)))),
             definitive_artifacts_found=data.get("definitive_artifacts_found", []),
             definitive_real_indicators=data.get("definitive_real_indicators", []),
+            editing_signs=data.get("editing_signs", []),
             reasoning=data.get("reasoning", ""),
             honest_assessment=data.get("honest_assessment", ""),
             raw_text=text
@@ -496,6 +505,7 @@ def parse_visual_expert_json(text: str) -> VisualExpertResponse:
             confidence=0.5,
             definitive_artifacts_found=[],
             definitive_real_indicators=[],
+            editing_signs=[],
             reasoning=f"Failed to parse Visual Expert response: {text[:200]}",
             honest_assessment="Parsing error",
             raw_text=text or ""
