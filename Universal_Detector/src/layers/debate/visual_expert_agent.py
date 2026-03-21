@@ -1,0 +1,168 @@
+"""
+Debate System — Visual Expert Agent
+Single neutral agent for UNCERTAIN web images.
+"""
+
+from typing import Optional
+from .models import (
+    VisualExpertResponse,
+    VISUAL_EXPERT_PROMPT,
+    parse_visual_expert_json,
+    GEMINI_VISUAL_MODEL,
+    GROQ_MODEL,
+    CEREBRAS_MODEL,
+    encode_image_base64,
+    get_mime_type,
+)
+
+class VisualExpertAgent:
+    """
+    Neutral forensic visual expert.
+    Reviews UNCERTAIN web images with calibrated confidence limits.
+
+    Primary:  Gemini 2.0 Flash Lite (Vision)
+    Fallback: Groq (meta-llama/llama-4-scout-17b-16e-instruct)
+    Last Resort: Cerebras (llama-3.3-70b)
+    """
+
+    def __init__(self, groq_api_key: str, cerebras_api_key: str, gemini_api_key: Optional[str] = None):
+        self._groq_key = groq_api_key
+        self._cerebras_key = cerebras_api_key
+        self._gemini_key = gemini_api_key
+        
+        self._groq_client = None
+        self._cerebras_client = None
+        self._gemini_model = None
+
+    def _init_gemini(self):
+        if self._gemini_model or not self._gemini_key: return
+        try:
+            import google.generativeai as genai
+            genai.configure(api_key=self._gemini_key)
+            self._gemini_model = genai.GenerativeModel(GEMINI_VISUAL_MODEL)
+            print(f"[Visual Expert] Initialized Gemini model: {GEMINI_VISUAL_MODEL}")
+        except Exception as e:
+            print(f"[Visual Expert] Gemini init failed: {e}")
+
+    def _init_groq(self):
+        if self._groq_client or not self._groq_key: return
+        try:
+            from groq import Groq
+            self._groq_client = Groq(api_key=self._groq_key)
+        except Exception as e:
+            print(f"[Visual Expert] Groq init failed: {e}")
+
+    def _init_cerebras(self):
+        if self._cerebras_client or not self._cerebras_key: return
+        try:
+            from openai import OpenAI
+            self._cerebras_client = OpenAI(
+                api_key=self._cerebras_key,
+                base_url="https://api.cerebras.ai/v1"
+            )
+        except Exception as e:
+            print(f"[Visual Expert] Cerebras init failed: {e}")
+
+    def _call_groq(self, system: str, user: str, image_path: Optional[str]) -> Optional[str]:
+        self._init_groq()
+        if not self._groq_client: return None
+
+        messages = [{"role": "system", "content": system}]
+        content = []
+        if image_path:
+            # Try sending image if supported by model (Llama 4 Scout implies vision)
+            b64 = encode_image_base64(image_path)
+            if b64:
+                mime = get_mime_type(image_path)
+                content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        
+        # Add text prompt
+        content.append({"type": "text", "text": user})
+        messages.append({"role": "user", "content": content})
+
+        try:
+            resp = self._groq_client.chat.completions.create(
+                messages=messages,
+                model=GROQ_MODEL,
+                temperature=0.1,  # Low temperature for factual assessment
+                response_format={"type": "json_object"}
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            print(f"[Visual Expert] Groq error: {e}")
+            return None
+
+    def _call_cerebras(self, system: str, user: str, image_path: Optional[str]) -> Optional[str]:
+        self._init_cerebras()
+        if not self._cerebras_client: return None
+
+        # Text only fallback for Cerebras Llama 3.3 70b
+        final_user = user
+        if image_path:
+            final_user = f"[NOTE: Image analysis skipped in fallback]\n\n{user}"
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": final_user}
+        ]
+        
+        try:
+            resp = self._cerebras_client.chat.completions.create(
+                messages=messages,
+                model=CEREBRAS_MODEL,
+                temperature=0.1,
+                response_format={"type": "json_object"}
+            )
+            return resp.choices[0].message.content
+        except Exception as e:
+            print(f"[Visual Expert] Cerebras error: {e}")
+            return None
+
+    def _call_gemini(self, system: str, user: str, image_path: Optional[str]) -> Optional[str]:
+        self._init_gemini()
+        if not self._gemini_model: return None
+        
+        full_prompt = f"{system}\n\n{user}"
+        try:
+            if image_path:
+                import PIL.Image
+                with PIL.Image.open(image_path) as img:
+                    img.load()
+                    resp = self._gemini_model.generate_content([full_prompt, img])
+            else:
+                resp = self._gemini_model.generate_content(full_prompt)
+            return resp.text
+        except Exception as e:
+            print(f"[Visual Expert] Gemini error: {e}")
+            return None
+
+
+    def analyze(self, image_path: str, case_string: str) -> VisualExpertResponse:
+        """
+        Run the single-shot visual expert analysis.
+        """
+        # Build prompt
+        prompt = (
+            f"FORENSIC CASE FILE:\n{case_string}\n\n"
+            "Analyze the image for definitive artifacts or real indicators. "
+            "Provide honest assessment with strict confidence limits."
+        )
+        
+        # 1. Gemini (Primary) - As requested (Gemini 2.0 Flash Lite)
+        text = self._call_gemini(VISUAL_EXPERT_PROMPT, prompt, image_path)
+        if text:
+            return parse_visual_expert_json(text)
+            
+        # 2. Groq (Secondary)
+        print("[Visual Expert] Gemini failed/unavailable -> trying Groq...")
+        text = self._call_groq(VISUAL_EXPERT_PROMPT, prompt, image_path)
+        if text:
+            return parse_visual_expert_json(text)
+        
+        # 3. Cerebras (Fallback)
+        print("[Visual Expert] Falling back to Cerebras...")
+        text = self._call_cerebras(VISUAL_EXPERT_PROMPT, prompt, image_path)
+        if text:
+            return parse_visual_expert_json(text)
+            
+        return parse_visual_expert_json("")  # Returns default UNCERTAIN response

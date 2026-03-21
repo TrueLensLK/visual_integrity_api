@@ -39,6 +39,23 @@ COMPRESSED_LAYER_WEIGHTS = {
     "context":   0.02,
 }
 
+# Fix 6: Web Sourced Weights (v5.0 - Image Origin Classifier)
+# Optimized for proven web/social media images (mozjpeg)
+WEB_SOURCED_LAYER_WEIGHTS = {
+    "visual":    0.45,  # Neural ensemble is primary pillar
+    "face":      0.25,  # Semantic consistency survives compression
+    "artifacts": 0.15,  # GAN grids survive JPEG blocks
+    "physics":   0.10,  # Bayer pattern only (noise/ELA invalid)
+    "shadow":    0.05,  # Minimal signal
+    "prnu":      0.00,  # Pure noise on web images
+    "spectrum":  0.00,  # Pure noise on web images
+    "watermark": 0.00,  # Unreliable
+    "metadata":  0.00,  # Stripped
+    "eye":       0.00,  # Degraded
+    "context":   0.00,  # Low signal
+    "physical_continuity": 0.00 # Often invalid due to resize
+}
+
 
 def calculate_integrity(
     c2pa_res: Dict,
@@ -60,17 +77,24 @@ def calculate_integrity(
     visual_confidence: float = 1.0,
     visual_uncertain: bool = False,
     is_jpeg: bool = False,
-    is_degraded_signal: bool = False,  # <-- ADD THIS NEW ARGUMENT FROM LAYER 1
+    is_degraded_signal: bool = False,
     # Model consensus parameters
     model_real_votes: int = 0,
     model_ai_votes: int = 0,
     model_count: int = 0,
     model_consensus: float = 0.0,
     # PRNU confidence metrics
-    prnu_flat_region_ratio: float = 1.0,  # 0-1, how much of image was flat regions
+    prnu_flat_region_ratio: float = 1.0,
     prnu_details: Dict = None,
-    # NEW v3.4: Bayer pattern flag (from physics layer details)
+    # NEW v3.4: Bayer pattern flag
     has_bayer_pattern: bool = False,
+    # NEW v5.0: Face detection count
+    face_count: int = 0,
+    # NEW v5.1: Granular model breakdown
+    model_breakdown: Dict = None,
+    # Fix 5: Origin Classifier Results
+    origin_classification: str = "CAMERA_ORIGINAL",
+    is_web_sourced: bool = False
 ) -> Tuple[int, str, str, Dict[str, float]]:
     """
     Master Judge v3.3 - Makes final verdict with safety checks
@@ -269,6 +293,33 @@ def calculate_integrity(
     print(f"\n[Judge] Checking Kill Switches...")
     
     # ------------------------------------------------------------------------
+    # FIX-7: Professional Photo Guard (Prevents False Kill Switch)
+    # ------------------------------------------------------------------------
+    # Professional sports/agency photos have high PCE (multi-gen JPEG) and
+    # bokeh (flat regions) that mimic AI. Detect this before killing.
+    # Conditions: >80% flat regions (bokeh) + Face Present + JPEG + High PCE signature
+    # (PCE signature is implied if PRNU score is low, we check conditions)
+    is_pro_photo_signature = (
+        prnu_flat_region_ratio > 0.80 and
+        face_count > 0 and
+        is_jpeg and
+        raw_scores.get("prnu", 0) <= -20 # Only care if PRNU is flagging it
+    )
+    
+    if is_pro_photo_signature:
+        print(f"\n[Judge] PROFESSIONAL PHOTO GUARD ACTIVE")
+        print(f"  Conditions met: Bokeh (Flat={prnu_flat_region_ratio:.1%}) + Face ({face_count}) + JPEG")
+        print(f"  → Downgrading PRNU (-50 -> -10) and Spectrum (-40 -> -10)")
+        print(f"  → High PCE/Spectrum anomalies likely caused by agency processing/bokeh")
+        
+        if raw_scores["prnu"] <= -20:
+            raw_scores["prnu"] = -10
+            prnu_score = -10
+        if raw_scores["spectrum"] <= -20:
+             raw_scores["spectrum"] = -10
+             spectrum_score = -10
+
+    # ------------------------------------------------------------------------
     # FIX-2: KILL SWITCH 1 - PRNU Synthetic Grid (REQUIRES CORROBORATION)
     # ------------------------------------------------------------------------
     # FIX-7: If image is compressed/web-sourced, PRNU is unreliable.
@@ -432,11 +483,19 @@ def calculate_integrity(
     # ------------------------------------------------------------------------
     # KILL SWITCH 5: Deepfake Signature (Real sensor + AI face)
     # ------------------------------------------------------------------------
-    if prnu_score >= 20 and face_score <= -25:
-        print(f"\n  [Kill Switch 5] Deepfake signature")
+    # Case A: High Quality Image (Standard PRNU check)
+    if not is_degraded_signal and prnu_score >= 20 and face_score <= -25:
+        print(f"\n  [Kill Switch 5A] Deepfake signature (HQ)")
         print(f"    PRNU={prnu_score} (real sensor) + Face={face_score} (anomalous)")
         print(f"    → KILL SWITCH ACTIVATED")
         return (15, "AI-GENERATED", f"Deepfake: Real camera base (PRNU={prnu_score:.1f}) with AI face (Face={face_score:.1f})", raw_scores)
+    
+    # Case B: Compressed Image (Face + Visual Consensus) -> NEW v5.0
+    if is_degraded_signal and face_count > 0 and face_score <= -20 and visual_score <= -20:
+        print(f"\n  [Kill Switch 5B] Deepfake signature (Compressed)")
+        print(f"    Compressed Image + Face={face_score} + Visual={visual_score}")
+        print(f"    → KILL SWITCH ACTIVATED")
+        return (15, "AI-GENERATED", f"Compressed Deepfake: Visual & Face models confirm AI (Visual={visual_score:.1f}, Face={face_score:.1f})", raw_scores)
     
 
     # ------------------------------------------------------------------------
@@ -469,20 +528,90 @@ def calculate_integrity(
     # ========================================================================
     effective_scores = raw_scores.copy()
     
+    # ------------------------------------------------------------------------
+    # FIX-5: Tighten LIKELY_WEB_SOURCED Zeroing (Before effective_scores!)
+    # ------------------------------------------------------------------------
+    if origin_classification == "LIKELY_WEB_SOURCED":
+        print(f"\n[Judge] Origin: LIKELY_WEB_SOURCED (Uncertain web processing)")
+        print(f"  → Zeroing fragile signals (PRNU, Spectrum, Watermark, Metadata)")
+        
+        # Zero local variables (used for veto logic)
+        prnu_score = 0
+        spectrum_score = 0
+        watermark_score = 0
+        meta_score = 0
+        
+        # Zero effective scores (used for final weights)
+        effective_scores["prnu"] = 0
+        effective_scores["spectrum"] = 0
+        effective_scores["watermark"] = 0
+        effective_scores["metadata"] = 0
+
+    # ------------------------------------------------------------------------
+    # FIX v5.1: Specialist-Weighted Hardware Veto
+    # ------------------------------------------------------------------------
+    specialist_veto = False
+    
+    if model_breakdown:
+        for name, data in model_breakdown.items():
+            if not data: continue 
+            
+            # Extract score/conf from dictionary
+            score = data.get("score", 0)
+            conf = data.get("conf", 0)
+            
+            # Fix 1 Part B - SDXL Specialist Block
+            # 90% (-10), 80% (-20), 60% (-35)
+            if name == "sdxl":
+                block_sdxl = False
+                if conf >= 0.90 and score < -10: block_sdxl = True
+                elif conf >= 0.80 and score < -20: block_sdxl = True
+                elif conf >= 0.60 and score < -35: block_sdxl = True
+                
+                if block_sdxl:
+                    print(f"\n[Judge] SPECIALIST VETO: SDXL Lightning predicts AI (score={score:.1f}, conf={conf:.2f})")
+                    print(f"  → Blocking Hardware Veto (SOTA landscape generator)")
+                    specialist_veto = True
+            
+            elif name == "deepfake_expert" and score <= -35:
+                print(f"\n[Judge] SPECIALIST VETO: Deepfake Expert predicts AI (score={score:.1f}, conf={conf:.2f})")
+                print(f"  → Blocking Hardware Veto (High-confidence face swap)")
+                specialist_veto = True
+
     # Hardware Veto (Physical DNA proves real)
     is_physically_real = prnu_score >= 20 and spectrum_score >= 18
     
+    # Fix 1 Part A: Neural Consensus Validation for Veto
     if is_physically_real:
-        print(f"\n[Judge] HARDWARE VETO ACTIVE")
-        print(f"  PRNU: {prnu_score:+.0f}")
-        print(f"  Spectrum: {spectrum_score:+.0f}")
-        print(f"  → Physical sensor DNA verified")
-        
-        # Cap AI signals
-        if effective_scores["visual"] < -5:
-            effective_scores["visual"] = -5
-        if effective_scores["artifacts"] < -10:
-            effective_scores["artifacts"] = -10
+        # Condition 1: Must have strong REAL consensus (3+ votes)
+        if model_real_votes < 3:
+            print(f"\n[Judge] HARDWARE VETO BLOCKED: Insufficient Neural Support")
+            print(f"  Neural Votes: {model_real_votes} REAL (Need 3+)")
+            is_physically_real = False
+            
+        # Condition 2: Must NOT have strong AI dissent (2+ votes)
+        elif model_ai_votes >= 2:
+            print(f"\n[Judge] HARDWARE VETO BLOCKED: Significant Neural Disagreement")
+            print(f"  Neural Votes: {model_ai_votes} AI (Must be < 2)")
+            is_physically_real = False
+
+    if is_physically_real:
+        if specialist_veto:
+            print(f"\n[Judge] HARDWARE VETO BLOCKED by Specialist Model")
+            print(f"  PRNU: {prnu_score:+.0f}, Spectrum: {spectrum_score:+.0f} -> IGNORED")
+            print(f"  → Evidence suggests SOTA AI with simulated sensor noise")
+            is_physically_real = False # Ensure Tier 2 doesn't fire
+        else:
+            print(f"\n[Judge] HARDWARE VETO ACTIVE")
+            print(f"  PRNU: {prnu_score:+.0f}")
+            print(f"  Spectrum: {spectrum_score:+.0f}")
+            print(f"  → Physical sensor DNA verified")
+            
+            # Cap AI signals
+            if effective_scores["visual"] < -5:
+                effective_scores["visual"] = -5
+            if effective_scores["artifacts"] < -10:
+                effective_scores["artifacts"] = -10
     
     # Lonewolf Rule
     ai_indicators = [k for k, s in effective_scores.items() if s <= -25 and k != "context"]
@@ -522,13 +651,36 @@ def calculate_integrity(
                     print(f"  {key}: {old:+.1f} → {effective_scores[key]:+.1f}")
     
     # ========================================================================
-    # WEIGHT SELECTION
+    # WEIGHT SELECTION (v6.0 Origin Aware Routing)
     # ========================================================================
-    if is_compressed_image:
+    if origin_classification == "WEB_SOURCED":
+        weights = dict(WEB_SOURCED_LAYER_WEIGHTS)
+        print(f"\n[Judge] Using WEB_SOURCED weights (Visual={weights['visual']*100:.0f}%, PRNU/Spec=0)")
+    
+    # Fallback to old heuristic if not strictly web-sourced
+    elif is_compressed_image:
         weights = dict(COMPRESSED_LAYER_WEIGHTS)
-        print(f"\n[Judge] Using COMPRESSED weights (visual={weights['visual']*100:.0f}%)")
+        print(f"\n[Judge] Using COMPRESSED weights (base visual={weights['visual']*100:.0f}%)")
+        
+        # v5.0: Face-Aware Routing
+        if face_count > 0:
+            print(f"   [Judge] Face Detected ({face_count}) -> Boosting Visual & Face Weights")
+            weights["visual"] = 0.35  # Boost Visual (includes Deepfake model)
+            weights["face"] = 0.15    # Boost Face (Layer 3.5)
+            weights["spectrum"] = 0.10 # Lower spectrum (less reliable)
+            weights["prnu"] = 0.00    # Ignore PRNU
+            weights["physics"] = 0.10
+        else:
+            print(f"   [Judge] No Face Detected -> Boosting Scene Visuals")
+            weights["visual"] = 0.40  # Heavily rely on SDXL/SigLIP
+            weights["face"] = 0.00    # Ignore face score
+            weights["spectrum"] = 0.15
+            
     else:
         weights = dict(LAYER_WEIGHTS)
+        if face_count > 0:
+             weights["visual"] = 0.20 # Slight boost
+             weights["face"] = 0.12   # Slight boost
     
     if visual_uncertain or visual_confidence < 0.4:
         weights["visual"] *= 0.5
@@ -660,38 +812,57 @@ def calculate_integrity(
 
 
     # TIER 8: FINAL VERDICT MAPPING
-    # REAL verdict
-    if final_auth >= 65:
+    
+    # Fix 8: UNCERTAIN Verdict for Web/Ambiguous Images
+    if is_web_sourced and 40 <= final_auth <= 60:
+         print(f"  [Judge] UNCERTAIN VERDICT TRIGGERED")
+         disabled_layers = [k for k, v in weights.items() if v == 0.0]
+         
+         # Fix 19: SDXL Fallback for UNCERTAIN cases
+         if model_breakdown and "sdxl" in model_breakdown and model_breakdown["sdxl"]:
+             sdxl_score = model_breakdown["sdxl"].get("score", 0)
+             if sdxl_score > 0:
+                 print(f"  [Fallback] SDXL says REAL ({sdxl_score:.1f}) -> LIKELY_REAL (60)")
+                 return (60, "LIKELY_REAL", f"Ambiguous Web Source -> SDXL Fallback (REAL: {sdxl_score:.1f})", effective_scores)
+             else:
+                 print(f"  [Fallback] SDXL says AI ({sdxl_score:.1f}) -> LIKELY_AI_GENERATED (35)")
+                 return (35, "LIKELY_AI_GENERATED", f"Ambiguous Web Source -> SDXL Fallback (AI: {sdxl_score:.1f})", effective_scores)
+
+         return (
+             int(final_auth), 
+             "UNCERTAIN", 
+             f"Web origin (disabled: {', '.join(disabled_layers)}) + Ambiguous Score ({final_auth:.1f}) - Neural models split/uncertain", 
+             effective_scores
+         )
+
+    # ========================================================================
+    # FIX-11: User Defined Score Ranges (Likely Real/AI)
+    # ------------------------------------------------------------------------
+    # Score > 75 => "REAL"
+    # Score 50-75 => "LIKELY_REAL"
+    # Score 25-49 => "LIKELY_AI_GENERATED"
+    # Score < 25 => "AI-GENERATED"
+    # ========================================================================
+
+    if final_auth > 75:
         return (int(final_auth), "REAL", "Strong multi-layer authenticity", effective_scores)
-    
-    if final_auth >= 55 and strong_real_count >= 2:
-        return (int(final_auth), "REAL", "Multiple forensic layers indicate camera source", effective_scores)
-    
-    # AI verdict (requires 2+ signals)
-    if final_auth <= 35 and strong_ai_count >= 2:
-        return (int(final_auth), "AI-GENERATED", f"Consensus AI detection ({strong_ai_count} signals)", effective_scores)
-    
-    if final_auth <= 45 and strong_ai_count >= 3:
+
+    if 50 <= final_auth <= 75:
+        # Check for upgrade to REAL if close to top of range with strong signals
+        if final_auth >= 70 and strong_real_count >= 2:
+             return (int(final_auth), "REAL", "Strong signals confirm authenticity", effective_scores)
+        return (int(final_auth), "LIKELY_REAL", "Score indicates likely authentic content", effective_scores)
+
+    if 25 <= final_auth <= 49:
+        # Check for upgrade to AI-GENERATED if close to bottom of range with strong signals
+        if final_auth <= 30 and strong_ai_count >= 2:
+             return (int(final_auth), "AI-GENERATED", f"Consensus AI detection ({strong_ai_count} signals)", effective_scores)
+        return (int(final_auth), "LIKELY_AI_GENERATED", "Score indicates likely AI generation", effective_scores)
+
+    if final_auth < 25:
         return (int(final_auth), "AI-GENERATED", f"Strong AI consensus ({strong_ai_count} signals)", effective_scores)
     
-    # Gap filler: Low score but insufficient signal consensus for full AI verdict
-    if final_auth <= 40 and strong_ai_count >= 1:
-        return (int(final_auth), "EDITED", "Strong AI signal found but lacks multi-layer consensus", effective_scores)
-    
-    # Conflicting signals
-    if 35 < final_auth < 60 and strong_ai_count > 0 and strong_real_count > 0:
-        return (int(final_auth), "EDITED", "Conflicting forensic signals", effective_scores)
-    
-    # Single AI signal without corroboration
-    if strong_ai_count == 1 and strong_real_count == 0:
-        return (int(final_auth), "EDITED", "Single AI indicator needs corroboration", effective_scores)
-    
-    # Weak signals: use count as tie-breaker
-    if strong_ai_count > strong_real_count:
-        return (int(final_auth), "EDITED", "Slight AI lean but insufficient evidence", effective_scores)
-    elif strong_real_count > strong_ai_count:
-        return (int(final_auth), "REAL", "More real indicators than AI", effective_scores)
-    
+    # Fallback / Gap filler (should be covered by ranges above, but just in case)
     return (int(final_auth), "EDITED", "Insufficient forensic evidence", effective_scores)
 
 

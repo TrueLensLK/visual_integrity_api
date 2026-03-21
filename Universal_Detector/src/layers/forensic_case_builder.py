@@ -139,7 +139,8 @@ def compile_case_file(
     model_real_votes: int = 0,
     model_ai_votes: int = 0,
     warnings: Optional[list] = None,
-    effective_scores: Optional[Dict[str, float]] = None
+    effective_scores: Optional[Dict[str, float]] = None,
+    model_breakdown: Optional[Dict[str, Any]] = None  # Added
 ) -> Dict[str, Any]:
     
     case_id = generate_case_id(image_path)
@@ -171,10 +172,29 @@ def compile_case_file(
             item["raw_strength"] = classify_evidence_strength(score)
         
         cat = get_category(layer_name)
-        evidence_by_category[cat].append(item)
+        if cat in evidence_by_category:  # Safe append
+            evidence_by_category[cat].append(item)
         all_evidence_flat.append(item)
 
-    # 2. Compile Final Dictionary
+    # 3. Detect Neural Outlier (Swin on Face=0)
+    neural_outlier_warning = None
+    neural_score = layer_scores.get('neural_network', 0)
+    
+    # Check if Swin corrupted the aggregate score (e.g., aggregate is +40 but most models are negative)
+    # This happens if Swin returns +50 while others return -10, averaging out to positive.
+    # Logic: If 3+ models say AI (model_ai_votes >= 3) but the aggregate score is positive,
+    # OR if Swin contributes highly positive score while face count is 0.
+    
+    # We can infer Swin's influence if we see high disagreement and specific conditions
+    if model_ai_votes >= 3 and neural_score > 0:
+         neural_outlier_warning = (
+            f"⚠️ CRITICAL: The aggregate neural_network score ({neural_score:+.1f}) may be INVALID. "
+            f"3/{model_ai_votes + model_real_votes} models say FAKE, yet the total score is POSITIVE. "
+            f"This suggests a face-swap model (Swin) defaulted to REAL on a faceless image. "
+            f"TRUST THE VOTE COUNT (3+ votes FAKE), NOT THE AGGREGATE SCORE."
+        )
+
+    # 4. Compile Final Case File
     return {
         "case_id": case_id,
         "timestamp": datetime.now().isoformat(),
@@ -193,7 +213,11 @@ def compile_case_file(
         "neural_consensus": {
             "real_votes": model_real_votes,
             "ai_votes": model_ai_votes,
-            "confidence": visual_confidence
+            "confidence": visual_confidence,
+            "outlier_warning": neural_outlier_warning, # NEW FIELD
+            "true_ai_votes": model_ai_votes,
+            "true_real_votes": model_real_votes,
+            "model_breakdown": model_breakdown if model_breakdown else {} # Added expert breakdown
         },
         "rule_based": {
             "verdict": rule_based_verdict,
@@ -262,6 +286,8 @@ def case_file_to_prompt_string(case_file: Dict[str, Any]) -> str:
     lines.append(f"Models voting REAL: {nn['real_votes']}")
     lines.append(f"Models voting FAKE: {nn['ai_votes']}")
     lines.append(f"Visual Confidence:  {nn['confidence']:.1%}")
+    if nn.get('outlier_warning'):
+        lines.append(f"\n{nn['outlier_warning']}\n")
 
     # 4. Contradictions
     if case_file.get('contradictions'):

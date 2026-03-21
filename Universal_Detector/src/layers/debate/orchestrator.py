@@ -45,32 +45,26 @@ class DebateOrchestrator:
     def __init__(
         self,
         gemini_api_key: Optional[str] = None,
-        openrouter_api_key: Optional[str] = None,
-        groq_api_key: Optional[str] = None
+        groq_api_key: Optional[str] = None,
+        cerebras_api_key: Optional[str] = None
     ):
-        self.prosecution = ProsecutionAgent(
-            gemini_api_key=gemini_api_key or "",
-            openrouter_api_key=openrouter_api_key or ""  # Fallback if Gemini quota exhausted
-        )
-        # Updated: Prioritize OpenRouter, but allow Gemini/Groq fallback
-        self.defense = DefenseAgent(
-            openrouter_api_key=openrouter_api_key or "",
-            gemini_api_key=gemini_api_key or "",
-            groq_api_key=groq_api_key or ""
-        )
-        self.convergence = ConvergenceDetector(
-            groq_api_key=groq_api_key,
-            gemini_api_key=gemini_api_key   # Fallback if Groq unavailable
-        )
+        import os
+        c_key = cerebras_api_key or os.environ.get("CEREBRAS_API_KEY")
+        g_key = groq_api_key or os.environ.get("GROQ_API_KEY", "")
+        
+        # New Architecture: Groq (Primary) -> Cerebras (Fallback)
+        self.prosecution = ProsecutionAgent(groq_api_key=g_key, cerebras_api_key=c_key)
+        self.defense = DefenseAgent(groq_api_key=g_key, cerebras_api_key=c_key)
+        
+        # Judge: Groq -> Cerebras (Fallback)
+        self.convergence = ConvergenceDetector(groq_api_key=g_key, cerebras_api_key=c_key)
         
         self.max_rounds = 3
 
         # Track valid providers
-        self._has_prosecution = bool(gemini_api_key or openrouter_api_key)
-        # Defense now has Gemini fallback
-        self._has_defense = bool(openrouter_api_key or gemini_api_key) 
-        # Convergence has Gemini fallback
-        self._has_convergence = bool(groq_api_key or gemini_api_key)
+        self._has_prosecution = bool(g_key or c_key)
+        self._has_defense = bool(g_key or c_key)
+        self._has_convergence = bool(g_key or c_key)
 
     def run_debate(
         self,
@@ -132,7 +126,11 @@ class DebateOrchestrator:
         })
 
         print(f"[Debate]    Prosecution: {prosecution_opening.confidence:.0%} confident → AI")
+        if prosecution_opening.visual_observations:
+            print(f"[Debate]       Visual: {prosecution_opening.visual_observations[0][:60]}...")
         print(f"[Debate]    Defense:     {defense_opening.confidence:.0%} confident → REAL")
+        if defense_opening.visual_observations:
+            print(f"[Debate]       Visual: {defense_opening.visual_observations[0][:60]}...")
 
         # Abort if both agents failed (no real arguments produced)
         if (not prosecution_opening.primary_evidence and
@@ -164,13 +162,6 @@ class DebateOrchestrator:
                 }]
             )
 
-        # Check convergence after round 1
-        convergence = self.convergence.check(debate_history, case_string)
-        if convergence.has_converged:
-            print(f"[Debate] Converged after Round 1: {convergence.verdict} "
-                  f"({convergence.confidence:.0%})")
-            return self._build_verdict(convergence, debate_history, start_time)
-
         # ── ROUNDS 2-3: Text-only rebuttals (no image — argue from evidence) ──
         last_defense = defense_opening
 
@@ -180,7 +171,6 @@ class DebateOrchestrator:
             prosecution_response = self.prosecution.respond(
                 last_defense, debate_history, case_string
             )
-
             defense_response = self.defense.respond(
                 prosecution_response, debate_history, case_string
             )
@@ -194,12 +184,25 @@ class DebateOrchestrator:
             print(f"[Debate]    Prosecution: {prosecution_response.confidence:.0%} confident → AI")
             print(f"[Debate]    Defense:     {defense_response.confidence:.0%} confident → REAL")
 
-            # Check convergence
-            convergence = self.convergence.check(debate_history, case_string)
-            if convergence.has_converged:
-                print(f"[Debate] Converged after Round {round_num}: "
-                      f"{convergence.verdict} ({convergence.confidence:.0%})")
-                return self._build_verdict(convergence, debate_history, start_time)
+            # Only allow early convergence on final rebuttal round (round 3)
+            # or if one side completely collapsed (confidence < 0.3)
+            one_side_collapsed = (
+                prosecution_response.confidence < 0.30 or
+                defense_response.confidence < 0.30
+            )
+
+            is_final_round = (round_num == self.max_rounds)
+
+            if is_final_round or one_side_collapsed:
+                convergence = self.convergence.check(debate_history, case_string)
+                if one_side_collapsed:
+                    print(f"[Debate] Early collapse detected — checking convergence")
+                if convergence.has_converged:
+                    print(f"[Debate] Converged after Round {round_num}: "
+                          f"{convergence.verdict} ({convergence.confidence:.0%})")
+                    return self._build_verdict(convergence, debate_history, start_time)
+            else:
+                print(f"[Debate] Round {round_num} complete — forcing Round {round_num + 1}")
 
             last_defense = defense_response
 
@@ -284,6 +287,7 @@ class DebateOrchestrator:
                 'prosecution': {
                     'confidence': entry['prosecution'].confidence,
                     'evidence': entry['prosecution'].primary_evidence,
+                    'visual_observations': entry['prosecution'].visual_observations,
                     'challenge': entry['prosecution'].challenge_to_opponent,
                     'concessions': entry['prosecution'].concessions,
                     'summary': entry['prosecution'].reasoning_summary
@@ -291,6 +295,7 @@ class DebateOrchestrator:
                 'defense': {
                     'confidence': entry['defense'].confidence,
                     'evidence': entry['defense'].primary_evidence,
+                    'visual_observations': entry['defense'].visual_observations,
                     'challenge': entry['defense'].challenge_to_opponent,
                     'concessions': entry['defense'].concessions,
                     'summary': entry['defense'].reasoning_summary

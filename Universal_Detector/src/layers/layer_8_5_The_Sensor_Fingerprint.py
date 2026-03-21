@@ -803,7 +803,8 @@ def validate_against_camera_profile(camera_model: str,
 
 def analyze_prnu_integrity(noise_residual: np.ndarray,
                            image_path: Optional[str] = None,
-                           flat_mask_info: Optional[Dict] = None
+                           flat_mask_info: Optional[Dict] = None,
+                           is_jpeg_hint: bool = False
                            ) -> Tuple[float, str, Dict]:
     """
     Full PRNU analysis with false positive reduction (v3.0).
@@ -835,7 +836,11 @@ def analyze_prnu_integrity(noise_residual: np.ndarray,
     f_noise = fft2(noise_norm)
     autocorr = np.real(np.fft.ifft2(f_noise * np.conj(f_noise)))
     autocorr = np.fft.fftshift(autocorr)
-    autocorr = autocorr / np.max(autocorr)  # Normalize
+    
+    # Normalize
+    max_corr = np.max(autocorr)
+    if max_corr > 1e-10:
+        autocorr = autocorr / max_corr
     
     pce, pce_details = compute_pce(autocorr)
     details["pce"] = pce_details
@@ -853,9 +858,20 @@ def analyze_prnu_integrity(noise_residual: np.ndarray,
     PCE_SYNTHETIC_THRESHOLD = 10000  # Above this = synthetic grid, not real sensor
     PCE_SUSPICIOUS_THRESHOLD = 5000  # Above this = suspicious, needs extra scrutiny
     
+    # Fix 9: Context-Aware PCE Threshold for Professional Photos
+    # Professional photos (agency -> Getty -> Google) have multi-generation
+    # JPEG compression that amplifies PCE into the hundreds of thousands.
+    # If the image has the "Professional Photo" signature, raise the threshold.
+    flat_ratio = flat_mask_info.get("flat_region_ratio", 0) if flat_mask_info else 0
+    
+    if is_jpeg_hint and flat_ratio > 0.80 and noise_variance < 0.05:
+        PCE_SYNTHETIC_THRESHOLD = 1000000 # 1 Million
+        print(f"   [PRNU] PRO PHOTO GUARD: Raising PCE threshold to 1,000,000 (Flat={flat_ratio:.1%}, Var={noise_variance:.4f}, JPEG=True)")
+    
     is_synthetic_grid = False
     if pce > PCE_SYNTHETIC_THRESHOLD:
-        print(f"   [PRNU] [!] SYNTHETIC GRID DETECTED! PCE={pce:.0f} exceeds physical limit (10,000)")
+        print(f"   [PRNU] [!] SYNTHETIC GRID DETECTED! PCE={pce:.0f} exceeds physical limit ({PCE_SYNTHETIC_THRESHOLD})")
+
         print(f"   [PRNU]    Real sensors have PCE 50-3000. This is a digital artifact.")
         is_synthetic_grid = True
         pce_details['synthetic_grid'] = True
@@ -1098,7 +1114,7 @@ def analyze_prnu_integrity(noise_residual: np.ndarray,
 # PUBLIC API
 # ============================================================================
 
-def get_prnu_score(file_path: str, use_flat_masking: bool = True) -> Tuple[float, str, Dict]:
+def get_prnu_score(file_path: str, use_flat_masking: bool = True, is_jpeg_hint: bool = False) -> Tuple[float, str, Dict]:
     """
     Main PRNU analysis with false positive reduction.
     
@@ -1121,10 +1137,14 @@ def get_prnu_score(file_path: str, use_flat_masking: bool = True) -> Tuple[float
         
         flat_mask_info = extract_info.get("flat_mask")
         
+        # Auto-detect JPEG if hint not provided
+        is_jpeg = is_jpeg_hint or file_path.lower().endswith(('.jpg', '.jpeg', '.webp'))
+        
         score, desc, details = analyze_prnu_integrity(
             noise, 
             image_path=file_path,
-            flat_mask_info=flat_mask_info
+            flat_mask_info=flat_mask_info,
+            is_jpeg_hint=is_jpeg
         )
         
         print(f"   [PRNU] Score: {score:+.0f} | {desc}")
@@ -1139,7 +1159,7 @@ def get_prnu_score(file_path: str, use_flat_masking: bool = True) -> Tuple[float
 
 def analyze_prnu(image_path: str, is_jpeg_hint: bool = False) -> Tuple[float, str, Dict]:
     """Wrapper for compatibility."""
-    return get_prnu_score(image_path)
+    return get_prnu_score(image_path, use_flat_masking=True, is_jpeg_hint=is_jpeg_hint)
 
 
 # ============================================================================
