@@ -620,28 +620,17 @@ async def _lifespan(application: FastAPI):
         limits=limits_config,
         http2=True,  # Enable HTTP/2 for better multiplexing
     )
-    yield
-    await _http_client.aclose()
-    _http_client = None
 
-
-# --- FastAPI App ---
-app = FastAPI(title="AI Image Detection v6.0")
-
-# --- MODEL HEALTH CHECK ---
-@app.on_event("startup")
-async def check_api_health():
-    """Verify primary models and fallbacks on startup."""
+    # --- Startup health check (moved here because @app.on_event is ignored
+    #     when lifespan= is used) ---
     print("\n[Startup] Checking Model Health...")
 
-    # Check Gemini
     gemini_key = os.getenv("GOOGLE_AI_API_KEY") or os.getenv("GEMINI_API_KEY")
     if gemini_key:
         print(f"✅ Gemini API Key found: {gemini_key[:5]}...")
     else:
         print("❌ Gemini API Key MISSING")
 
-    # Check OpenRouter Fallback Chain
     openrouter_key = os.getenv("OPENROUTER_API_KEY")
     if openrouter_key:
         print(f"✅ OpenRouter API Key found: {openrouter_key[:5]}...")
@@ -649,24 +638,31 @@ async def check_api_health():
         for i, model in enumerate(OPENROUTER_VISION_MODELS):
             print(f"   {i+1}. {model}")
 
-        # Simple connectivity check
         print("   Checking OpenRouter connectivity...")
-        import requests
         try:
-            resp = requests.get("https://openrouter.ai/api/v1/auth/key",
-                              headers={"Authorization": f"Bearer {openrouter_key}"},
-                              timeout=2)  # Ultra-short timeout to prevent startup hang
+            resp = await _http_client.get(
+                "https://openrouter.ai/api/v1/auth/key",
+                headers={"Authorization": f"Bearer {openrouter_key}"},
+                timeout=2.0,
+            )
             if resp.status_code == 200:
                 print("   ✅ OpenRouter Connectivity: OK")
             else:
                 print(f"   ⚠️ OpenRouter Connectivity Check Failed: {resp.status_code}")
         except Exception as e:
-             print(f"   ⚠️ OpenRouter Connectivity Check Error: {e}")
+            print(f"   ⚠️ OpenRouter Connectivity Check Error: {e}")
     else:
         print("❌ OpenRouter API Key MISSING - Debate/Defense agents will fail.")
 
     print("[Startup] Health check complete.\n")
 
+    yield
+    await _http_client.aclose()
+    _http_client = None
+
+
+# --- FastAPI App ---
+app = FastAPI(title="AI Image Detection v6.0", lifespan=_lifespan)
 
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
