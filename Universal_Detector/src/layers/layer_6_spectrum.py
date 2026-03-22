@@ -104,14 +104,6 @@ def advanced_jpeg_detection(magnitude_spectrum: np.ndarray, img_shape: Tuple[int
 def detect_periodic_spikes(magnitude_spectrum: np.ndarray) -> Tuple[int, float]:
     """
     Detect periodic frequency spikes (general AI artifacts)
-    
-    FP-4 FIX: Exclude the DC-adjacent cross (JPEG 8x8 block artifacts)
-    and use a higher threshold (mean + 4*std instead of 3*std) to reduce
-    false positives on compressed images.
-    
-    Returns:
-        spike_count: Number of peaks above threshold
-        spike_strength: Average strength of peaks
     """
     h, w = magnitude_spectrum.shape
     cy, cx = h // 2, w // 2
@@ -148,15 +140,7 @@ def detect_periodic_spikes(magnitude_spectrum: np.ndarray) -> Tuple[int, float]:
 
 
 def analyze_directional_spectrum(magnitude_spectrum: np.ndarray) -> Dict:
-    """
-    L6-3: Detect directional patterns (AI upsampling grids are axis-aligned)
-    
-    AI upsampling creates periodic patterns along horizontal and vertical axes.
-    This detects those patterns that radial averaging would miss.
-    
-    Returns:
-        Dict with score and description
-    """
+
     h, w = magnitude_spectrum.shape
     
     # Horizontal profile (average along columns)
@@ -224,19 +208,7 @@ def analyze_directional_spectrum(magnitude_spectrum: np.ndarray) -> Dict:
 
 
 def detect_gan_checkerboard(magnitude_spectrum: np.ndarray) -> Dict:
-    """
-    L6-6: Detect GAN checkerboard pattern from transposed convolution
-    
-    GANs using stride-2 transposed convolution create characteristic checkerboard
-    artifacts at specific frequencies (half the image size).
-    
-    Pattern appears as strong peaks at:
-    - Frequency = N/2 (cardinal directions)
-    - Moderate peaks at diagonals
-    
-    Returns:
-        Dict with score and description
-    """
+   
     h, w = magnitude_spectrum.shape
     center_y, center_x = h // 2, w // 2
     
