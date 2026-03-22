@@ -12,13 +12,11 @@ from typing import Tuple, Dict, List, Optional
 # CONSTANTS (L8-6: all thresholds documented & calibrated)
 # ============================================================================
 
-# L8-6: Visible watermark edge-density thresholds
 # Calibrated: mean Canny density of 1000 real photos vs 1000 AI-watermarked
 # Real photo corners avg ~3-8, AI watermark corners avg ~18-45
 EDGE_DENSITY_STRONG = 22.0   # Very likely visible watermark
 EDGE_DENSITY_WEAK   = 12.0   # Possible light watermark
 
-# L8-6: Invisible watermark FFT spike threshold
 # Old: max > mean*50 (uncalibrated magic number)
 # New: calibrated on 500 clean images → 99th-percentile ratio is ~25
 # AI-watermarked images show ratio > 35 consistently
@@ -59,16 +57,7 @@ AI_BADGE_FRAGMENTS = [
 # ============================================================================
 
 def scan_visible_watermarks(gray: np.ndarray) -> Dict:
-    """
-    L8-1 FIX: Scan ALL regions for visible watermarks, not just bottom-right.
-
-    Checks 8 regions: 4 corners + 4 edge-centers + full-image tiled overlay.
-    Watermarks from stock sites (Shutterstock, Getty) often tile across the
-    center. AI badges appear in various corners.
-
-    Returns:
-        Dict with score, description, and per-region results
-    """
+    
     h, w = gray.shape
     margin_y = max(int(h * 0.10), 30)
     margin_x = max(int(w * 0.10), 30)
@@ -133,24 +122,10 @@ def scan_visible_watermarks(gray: np.ndarray) -> Dict:
 
 
 # ============================================================================
-# L8-2: AI LOGO / TEXT DETECTION
+# AI LOGO / TEXT DETECTION
 # ============================================================================
 
 def detect_ai_text_markers(gray: np.ndarray) -> Dict:
-    """
-    L8-2 FIX: Detect AI generator text/logos in the image.
-
-    Uses:
-      1. MSER text region detection (finds text-like blobs)
-      2. Edge-based logo detection in high-contrast small regions
-      3. Pattern matching for known AI badge shapes
-
-    Note: Full OCR (Tesseract) is optional - we detect text-like regions
-    and check structural patterns even without OCR.
-
-    Returns:
-        Dict with score and description
-    """
     h, w = gray.shape
 
     # ---- 1. MSER text region detection ----
@@ -266,17 +241,7 @@ def detect_ai_text_markers(gray: np.ndarray) -> Dict:
 # ============================================================================
 
 def detect_steganography(gray: np.ndarray, img_color: np.ndarray) -> Dict:
-    """
-    L8-3 FIX: Multi-method steganography detection.
 
-    Methods:
-      1. Multi-band LSB analysis (R, G, B, Gray - not just one corner)
-      2. Chi-square attack (statistical test for LSB embedding)
-      3. DCT-domain anomaly detection (JPEG stego tools like JSteg, F5)
-
-    Returns:
-        Dict with score and description
-    """
     h, w = gray.shape
     results = {}
 
@@ -396,25 +361,7 @@ def detect_steganography(gray: np.ndarray, img_color: np.ndarray) -> Dict:
 # ============================================================================
 
 def detect_hash_watermark(gray: np.ndarray) -> Dict:
-    """
-    L8-4 FIX: Detect hash-based watermarks embedded by OpenAI, Google, etc.
 
-    These watermarks embed a cryptographic hash into the image's frequency
-    domain. They survive JPEG compression, resizing, and mild edits.
-
-    Detection approach:
-      1. Compute full-image FFT magnitude spectrum
-      2. Look for a structured pattern in mid-frequency bands
-         (hash watermarks avoid DC and very-high frequencies)
-      3. Check for unusual spectral peaks at non-natural frequencies
-      4. Compare energy distribution against natural image baseline
-
-    Hash watermarks create a distinctive "comb" pattern in mid-frequencies
-    that natural images almost never exhibit.
-
-    Returns:
-        Dict with score and description
-    """
     h, w = gray.shape
 
     # Full-image FFT
@@ -524,28 +471,7 @@ def detect_hash_watermark(gray: np.ndarray) -> Dict:
 
 def detect_synthid_stable_signature(gray: np.ndarray,
                                      img_color: np.ndarray) -> Dict:
-    """
-    L8-5 FIX: Detect Google SynthID and Stability AI's Stable Signature.
-
-    SynthID:
-      - Embeds an imperceptible pattern into the latent space of Imagen
-      - Survives compression, cropping, brightness changes
-      - Creates subtle but detectable correlations in wavelet sub-bands
-
-    Stable Signature:
-      - Embeds watermark during the VAE decoding step of Stable Diffusion
-      - Modifies specific frequency sub-bands of the generated image
-      - Detectable via cross-channel correlation in wavelet domain
-
-    Detection methods:
-      1. Wavelet cross-band correlation (SynthID signature)
-      2. Channel correlation anomaly in mid-frequencies (Stable Signature)
-      3. Latent-space periodicity detection (both)
-      4. Inter-channel phase coherence (AI watermarks synchronize phases)
-
-    Returns:
-        Dict with score and description
-    """
+   
     h, w = gray.shape
     reasons = []
     score = 0
@@ -697,17 +623,6 @@ def detect_synthid_stable_signature(gray: np.ndarray,
 # ============================================================================
 
 def detect_invisible_fft(gray: np.ndarray) -> Dict:
-    """
-    Full-image FFT invisible watermark detection with calibrated thresholds.
-
-    L8-3 + L8-6 FIX: Uses the entire image (not just a 64x64 corner)
-    and applies calibrated thresholds instead of magic numbers.
-
-    Checks multiple patch sizes to catch watermarks at different scales.
-
-    Returns:
-        Dict with score and description
-    """
     h, w = gray.shape
 
     # Analyze at multiple scales
@@ -782,21 +697,7 @@ def detect_invisible_fft(gray: np.ndarray) -> Dict:
 # ============================================================================
 
 def detect_watermarks(image_path: str, is_jpeg: bool = False) -> Tuple[float, str]:
-    """
-    Layer 8: Complete Watermark & Digital Signature Detection
 
-    Combines all 6 detection methods:
-      1. Full-image visible watermark scan        (L8-1)
-      2. AI logo/text detection (MSER + OCR)      (L8-2)
-      3. Steganography (LSB + chi² + DCT)         (L8-3)
-      4. Hash-based watermark detection            (L8-4)
-      5. SynthID / Stable Signature detection      (L8-5)
-      6. Calibrated FFT invisible watermark        (L8-3/L8-6)
-
-    Returns:
-        (score, description)
-        score: -50 (strong AI watermark) to 0 (clean)
-    """
     try:
         img = cv2.imread(image_path)
         if img is None:
