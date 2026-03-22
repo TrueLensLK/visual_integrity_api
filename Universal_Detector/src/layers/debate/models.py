@@ -20,6 +20,9 @@ GEMINI_VISUAL_MODEL = "gemini-2.0-flash-lite-preview-02-05" # As requested
 GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"  # As requested
 CEREBRAS_MODEL = "llama-3.3-70b"  # As requested fallback
 
+# Placeholder for OpenRouter models (unused)
+OPENROUTER_VISION_MODELS = []
+
 # ═══════════════════════════════════════════════════════════════════════
 # DATA CLASSES
 # ═══════════════════════════════════════════════════════════════════════
