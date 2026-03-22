@@ -8,10 +8,6 @@ SPATIAL Domain and Pixel Co-occurrence logic to find:
 2. Grid-like dependencies in pixel neighborhoods (Autocorrelation).
 3. Resampling Traces (interpolation artifacts).
 
-VERSION: 2.0 - FALSE POSITIVE REDUCTION
-- Higher thresholds to avoid flagging natural textures
-- Multi-scale analysis to distinguish AI grids from natural patterns
-- JPEG/compression-aware detection
 """
 
 import cv2
@@ -88,10 +84,7 @@ def calculate_spatial_autocorrelation(img_gray: np.ndarray) -> dict:
     }
 
 def detect_checkerboard_spatial(img_gray: np.ndarray) -> float:
-    """
-    Uses a Laplacian-like kernel specifically tuned for 
-    high-frequency checkerboard toggles (0-255-0-255).
-    """
+
     # Kernel to find 1-pixel alternating patterns
     k1 = np.array([[ 1, -1],
                    [-1,  1]])
@@ -105,12 +98,8 @@ def detect_checkerboard_spatial(img_gray: np.ndarray) -> float:
 def analyze_artifacts(file_path: str, is_jpeg: bool = False) -> dict:
     """
     Main artifact analysis with FALSE POSITIVE REDUCTION.
-    
-    Key changes from v1.0:
-    - Much higher thresholds (real photos often have natural textures)
-    - Require REGULAR GRID pattern, not just high echo
-    - Multi-factor decision (echo + regularity + checkerboard)
-    - v2.1: JPEG-aware - ignores 8x8 block boundary grids from JPEG compression
+    Philosophy: Only flag as AI if we see CLEAR synthetic patterns.
+    Natural textures (brick, fabric, foliage) can have echoes but they're not REGULAR GR
     """
     try:
         img = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
