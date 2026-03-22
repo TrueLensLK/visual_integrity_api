@@ -689,19 +689,6 @@ async def _lifespan(application: FastAPI):
         for i, model in enumerate(OPENROUTER_VISION_MODELS):
             print(f"   {i+1}. {model}")
 
-        print("   Checking OpenRouter connectivity...")
-        try:
-            resp = await _http_client.get(
-                "https://openrouter.ai/api/v1/auth/key",
-                headers={"Authorization": f"Bearer {openrouter_key}"},
-                timeout=2.0,
-            )
-            if resp.status_code == 200:
-                print("   OpenRouter Connectivity: OK")
-            else:
-                print(f"   OpenRouter Connectivity Check Failed: {resp.status_code}")
-        except Exception as e:
-            print(f"   ⚠️ OpenRouter Connectivity Check Error: {e}")
     else:
         print("OpenRouter API Key MISSING - Debate/Defense agents will fail.")
 
