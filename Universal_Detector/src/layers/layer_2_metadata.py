@@ -1,20 +1,5 @@
 """
 Layer 2: Metadata Forensics
-VERSION: 2.1 — Neutral-start, -50 to +50 scoring (matches all other layers)
-
-FIXES:
-   L2-FP1: Score starts at 0 (neutral), not 50 — no bias either way
-   L2-FP2: Missing Make/Model is NOT a penalty (webcams/screenshots lack it)
-   L2-FP3: Webcam & capture software recognized as legitimate sources
-   L2-FP4: PNG applist crash fixed (only check thumbnails for JPEG)
-   L2-FP5: Score range -50 to +50 aligned with all other layers
-   L2-1: Deep blob scan for AI technical signatures
-   L2-2: Timestamp validation
-   L2-3: GPS validation
-   L2-4: Software/Hardware analysis
-   L2-5: EXIF thumbnail (JPEG only)
-   L2-6: Extended AI signature dictionary
-   L2-7: Stripped metadata detection
 """
 
 import os

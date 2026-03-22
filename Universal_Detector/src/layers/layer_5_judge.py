@@ -269,7 +269,7 @@ def calculate_integrity(
     Returns:
         (final_score, verdict, description, effective_scores)
     """
-
+    
     # 1. RAW SCORE COLLECTION
     raw_scores = {
         "visual": visual_score,
@@ -285,6 +285,29 @@ def calculate_integrity(
         "context": context_score,
         "physical_continuity": physical_continuity_score,
     }
+
+    # --- 0. FAST PATH: SDXL + Ateeqq consensus ---
+    # Fix 3: If our two best models (SDXL for general, Ateeqq for MJ/Art) 
+    # strongly agree it's REAL, we trust them over minor signal noise.
+    
+    sdxl_stats = model_breakdown.get("sdxl") if model_breakdown else None
+    ateeqq_stats = model_breakdown.get("ateeqq") if model_breakdown else None
+    
+    if sdxl_stats and ateeqq_stats:
+        sdxl_is_real = sdxl_stats.get("score", 0) > 25
+        ateeqq_is_real = ateeqq_stats.get("score", 0) > 25
+        
+        if (sdxl_is_real and sdxl_stats.get("conf", 0) > 0.80 and
+            ateeqq_is_real and ateeqq_stats.get("conf", 0) > 0.80):
+            print(f"\n[Judge] FAST PATH: High confidence agreement (SDXL & Ateeqq)")
+            print(f"  SDXL: {sdxl_stats.get('score')} ({sdxl_stats.get('conf'):.2f})")
+            print(f"  Ateeqq: {ateeqq_stats.get('score')} ({ateeqq_stats.get('conf'):.2f})")
+            return (
+                72, 
+                "LIKELY_REAL", 
+                "Fast Path: High confidence agreement (SDXL & Ateeqq)", 
+                raw_scores
+            )
 
     # ========================================================================
     # UPSCALER / ENHANCEMENT EXCEPTION (PRIORITY CHECK)
@@ -460,31 +483,39 @@ def calculate_integrity(
     print(f"\n[Judge] Checking Kill Switches...")
     
     # ------------------------------------------------------------------------
-    # FIX-7: Professional Photo Guard (Prevents False Kill Switch)
+    # FIX-3: Professional Photo Guard (Updated v5.2)
     # ------------------------------------------------------------------------
-    # Professional sports/agency photos have high PCE (multi-gen JPEG) and
-    # bokeh (flat regions) that mimic AI. Detect this before killing.
-    # Conditions: >80% flat regions (bokeh) + Face Present + JPEG + High PCE signature
-    # (PCE signature is implied if PRNU score is low, we check conditions)
+    # Detects real photos with high flat regions (bokeh/product) that mimic AI.
+    # New Condition: High flatness + JPEG + High PCE + Low Noise Variance
+    # Removed: Face requirement (was too restrictive)
+    
+    nv = prnu_details.get("noise_variance", 1.0) if prnu_details else 1.0
+    
+    # Handle PCE (can be float or dict)
+    pce_entry = prnu_details.get("pce", 0) if prnu_details else 0
+    if isinstance(pce_entry, dict):
+        pce = pce_entry.get("pce", 0)
+    else:
+        pce = float(pce_entry)
+
     is_pro_photo_signature = (
         prnu_flat_region_ratio > 0.80 and
-        face_count > 0 and
         is_jpeg and
+        pce > 10000 and
+        nv < 0.10 and
         raw_scores.get("prnu", 0) <= -20 # Only care if PRNU is flagging it
     )
     
     if is_pro_photo_signature:
         print(f"\n[Judge] PROFESSIONAL PHOTO GUARD ACTIVE")
-        print(f"  Conditions met: Bokeh (Flat={prnu_flat_region_ratio:.1%}) + Face ({face_count}) + JPEG")
-        print(f"  → Downgrading PRNU (-50 -> -10) and Spectrum (-40 -> -10)")
-        print(f"  → High PCE/Spectrum anomalies likely caused by agency processing/bokeh")
+        print(f"  Conditions met: Flat={prnu_flat_region_ratio:.1%} | PCE={pce:.0f} | Noise={nv:.3f} | JPEG=True")
+        print(f"  → Downgrading PRNU (-50 -> -10)")
+        print(f"  → High flat regions + low noise variance indicates compressed photo, not AI grid")
         
         if raw_scores["prnu"] <= -20:
             raw_scores["prnu"] = -10
             prnu_score = -10
-        if raw_scores["spectrum"] <= -20:
-             raw_scores["spectrum"] = -10
-             spectrum_score = -10
+        # Spectrum degradation logic removed per spec - guard only touches PRNU
 
     # ------------------------------------------------------------------------
     # FIX-2: KILL SWITCH 1 - PRNU Synthetic Grid (REQUIRES CORROBORATION)
@@ -636,16 +667,29 @@ def calculate_integrity(
             print(f"    [i] Photographer watermark detected (not AI)")
             raw_scores["watermark"] = 0
         else:
-            # Need corroboration
-            other_ai = [k for k, s in raw_scores.items() 
-                       if k != "watermark" and s <= -20]
+            # FIX 1: Ignore on Web Images if Models say REAL (unless hardware confirms)
+            is_web_context = (origin_classification in ["WEB_SOURCED", "LIKELY_WEB_SOURCED"])
             
-            if len(other_ai) >= 1:
-                print(f"    [+] Corroborated by {other_ai}")
-                print(f"    → KILL SWITCH ACTIVATED")
-                return (5, "AI-GENERATED", f"AI watermark ({watermark_desc})", raw_scores)
+            # Check for hardware corroboration (PRNU or Spectrum)
+            has_hardware_support = (raw_scores.get("prnu", 0) <= -20 or raw_scores.get("spectrum", 0) <= -20)
+
+            if is_web_context and model_consensus_override == "REAL" and not has_hardware_support:
+                 print(f"    [!] Kill Switch BLOCKED: Models say REAL + Web Origin (No hardware support)")
+                 print(f"    → Watermark likely compression artifact")
+                 raw_scores["watermark"] = 0
+                 watermark_score = 0
+            
             else:
-                print(f"    ! No corroboration - continuing")
+                # Need corroboration
+                other_ai = [k for k, s in raw_scores.items() 
+                           if k != "watermark" and s <= -20]
+                
+                if len(other_ai) >= 1:
+                    print(f"    [+] Corroborated by {other_ai}")
+                    print(f"    → KILL SWITCH ACTIVATED")
+                    return (5, "AI-GENERATED", f"AI watermark ({watermark_desc})", raw_scores)
+                else:
+                    print(f"    ! No corroboration - continuing")
     
     # ------------------------------------------------------------------------
     # KILL SWITCH 5: Deepfake Signature (Real sensor + AI face)
@@ -839,7 +883,7 @@ def calculate_integrity(
             weights["physics"] = 0.10
         else:
             print(f"   [Judge] No Face Detected -> Boosting Scene Visuals")
-            weights["visual"] = 0.40  # Heavily rely on SDXL/SigLIP
+            weights["visual"] = 0.40  # Heavily rely on SDXL/Ateeqq
             weights["face"] = 0.00    # Ignore face score
             weights["spectrum"] = 0.15
             

@@ -1,21 +1,6 @@
 """
 Layer 8.5: PRNU (Photo Response Non-Uniformity) Sensor Fingerprint Analysis
-VERSION: 3.0 - False Positive Reduction
 
-NEW IMPROVEMENTS (v3.0):
-  FP-1: Flat-region masking (exclude textured areas from analysis)
-  [+] FP-2: PCE (Peak-to-Correlation Energy) replaces raw peak counting
-  [+] FP-3: NUA (Non-Unique Artifacts) detection and filtering
-  [+] FP-4: Edge-aware noise extraction
-  [+] FP-5: JPEG artifact discrimination
-
-PREVIOUS FIXES (v2.0):
-  [+] L8.5-1: Reference pattern database
-  [+] L8.5-2: Wavelet-based denoising
-  [+] L8.5-3: Flat-field reference estimation
-  [+] L8.5-4: Adaptive entropy
-  [+] L8.5-5: Camera-specific PRNU validation
-  [+] L8.5-6: Spectral flatness analysis
 """
 
 import numpy as np

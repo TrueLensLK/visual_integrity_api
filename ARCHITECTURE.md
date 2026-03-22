@@ -56,7 +56,7 @@ Each layer runs independently and produces a score (-50 for Fake to +50 for Real
 *   **L2 Metadata**: Reads hidden text tags. Looks for "Adobe Firefly" or "Midjourney" tags (Fake) vs. valid iPhone/Canon sensor data (Real).
 *   **L3 Digital Physics**: Looks at the pixels. Detects if objects were "pasted" (ELA) or if the image is impossibly smooth (Denoising artifacts).
 *   **L3.5 Face Consistency**: Checks if the face matches the background. (e.g., A high-def face on a blurry background is suspicious).
-*   **L4 Visual AI**: A 5-model neural ensemble (SDXL Detector, ViT, SigLIP2, ConvNeXt, Swin) trained to spot visual glitches humans miss (e.g., 6 fingers, melting ears).
+*   **L4 Visual AI**: A 6-model neural ensemble (SDXL, ViT, Ateeqq, ConvNeXt, Swin, Deepfake) trained to spot visual glitches humans miss (e.g., 6 fingers, melting ears).
 *   **L6 Spectrum**: Uses math (FFT) to look at invisible frequencies. AI generators create perfect "grid" patterns; real cameras create messy noise.
 *   **L7 Eyes**: Physics check. Do the reflections in the eyes match? (e.g., light coming from left in one eye, right in the other).
 *   **L8 Watermark**: Scans for hidden AI barcodes (SynthID, Stable Diffusion invisible watermarks).

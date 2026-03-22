@@ -1,13 +1,14 @@
 """
-Layer 4: Neural Network Ensemble v4.0 (5-Model Consensus)
+Layer 4: Neural Network Ensemble v5.0 (6-Model Consensus)
 ============================================================
-Combines FIVE specialized deep learning models for robust detection:
+Combines SIX specialized deep learning models for robust detection:
 
-  4.1 SDXL Detector    → Stable Diffusion XL specific (replaces EfficientNet-B0)
-  4.2 ViT Transformer  → Macro-geometry (semantic inconsistencies)
-  4.3 SigLIP2          → Global coherence (CLIP-based scene analysis)
-  4.4 ConvNeXt         → Modern CNN for AI artifacts
-  4.5 Swin Transformer → Hierarchical vision transformer
+  4.1 SDXL Detector    → Stable Diffusion XL specific
+  4.2 ViT Transformer  → Macro-geometry
+  4.3 Deepfake Expert  → Face-Swap specialist (Deepfake-v1) - *Runs if Face > 0*
+  4.4 Ateeqq           → Midjourney/DALLE Expert (Generative Artifacts)
+  4.5 ConvNeXt         → Modern CNN
+  4.6 Swin Transformer → Hierarchical vision transformer
 
 WHY 5 MODELS?
 - Works on WhatsApp/Google compressed images (content-level analysis)
@@ -34,13 +35,11 @@ import torch.nn as nn
 import numpy as np
 from torchvision import transforms
 from PIL import Image
-from transformers import AutoImageProcessor, AutoModelForImageClassification
 try:
-    from transformers import SiglipForImageClassification
-    HAS_SIGLIP = True
+    from transformers import AutoModelForImageClassification, AutoImageProcessor
 except ImportError:
-    HAS_SIGLIP = False
-    print("[Layer 4] Warning: SiglipForImageClassification not available, will skip Layer 4.3")
+    print("[Layer 4] Transformers library not found. Install with `pip install transformers`.")
+    exit(1)
 
 try:
     from transformers import ConvNextForImageClassification
@@ -73,8 +72,8 @@ VIT_MODEL_NAME = "prithivMLmods/Deep-Fake-Detector-v2-Model"
 #    New for v5.0 - Only runs when face is detected
 DEEPFAKE_MODEL_NAME = "prithivMLmods/deepfake-detector-model-v1"
 
-# 4. SigLIP2 Settings (HuggingFace) - Global coherence detector
-SIGLIP_MODEL_NAME = "prithivMLmods/open-deepfake-detection"
+# 4. Ateeqq AI vs Human Detector (HuggingFace) - Broad Spectrum (Midjourney v6, SD 3.5, GPT-4o)
+ATEEQQ_MODEL_NAME = "Ateeqq/ai-vs-human-image-detector"
 
 # 5. ConvNeXt AI Detector (HuggingFace) - Modern CNN for AI detection
 CONVNEXT_MODEL_NAME = "umm-maybe/AI-image-detector"
@@ -87,8 +86,8 @@ SWIN_MODEL_NAME = "Wvolf/ViT_Deepfake_Detection"  # Alternative Swin-based detec
 W_SDXL      = 0.15
 W_VIT       = 0.15
 W_DEEPFAKE  = 0.20  # Strong weight for face swaps
-W_SIGLIP    = 0.18
-W_CONVNEXT  = 0.17
+W_ATEEQQ    = 0.22  # High weight for Midjourney/DALLE-3 coverage
+W_CONVNEXT  = 0.13
 W_SWIN      = 0.15
 
 # ==========================================
@@ -105,9 +104,9 @@ _vit_fake_idx = 1  # Auto-detected on load
 _deepfake_model = None      # New
 _deepfake_processor = None  # New
 _deepfake_fake_idx = 0      # New
-_sig_model = None
-_sig_processor = None
-_sig_fake_idx = 0  # Auto-detected on load
+_ateeqq_model = None
+_ateeqq_processor = None
+_ateeqq_fake_idx = 0  # Auto-detected on load
 _convnext_model = None
 _convnext_processor = None
 _convnext_fake_idx = 0  # Auto-detected on load
@@ -137,7 +136,7 @@ def _load_models():
     global _sdxl_model, _sdxl_processor, _sdxl_fake_idx
     global _vit_model, _vit_processor, _vit_fake_idx
     global _deepfake_model, _deepfake_processor, _deepfake_fake_idx
-    global _sig_model, _sig_processor, _sig_fake_idx
+    global _ateeqq_model, _ateeqq_processor, _ateeqq_fake_idx
     global _convnext_model, _convnext_processor, _convnext_fake_idx
     global _swin_model, _swin_processor, _swin_fake_idx
     
@@ -186,23 +185,20 @@ def _load_models():
         _deepfake_model = None
         _deepfake_processor = None
 
-    # --- 4.3: Load SigLIP2 (Global coherence detector) ---
-    if HAS_SIGLIP:
-        try:
-            print(f"[Layer 4.3] Loading SigLIP2: {SIGLIP_MODEL_NAME}...")
-            _sig_processor = AutoImageProcessor.from_pretrained(SIGLIP_MODEL_NAME)
-            _sig_model = SiglipForImageClassification.from_pretrained(SIGLIP_MODEL_NAME)
-            _sig_model.to(_device).eval()
-            _sig_fake_idx = _detect_fake_index(_sig_model, "SigLIP")
-            print("[Layer 4.3] SigLIP2 loaded")
-        except Exception as e:
-            print(f"[Layer 4.3 Error] SigLIP Load Failed: {e}")
-            _sig_model = None
-            _sig_processor = None
-    else:
-        print("[Layer 4.3] SigLIP not available (transformers version too old?)")
-        _sig_model = None
-        _sig_processor = None
+    # --- 4.3: Load Ateeqq (Midjourney/DALLE Expert) ---
+    try:
+        print(f"[Layer 4.3] Loading Ateeqq: {ATEEQQ_MODEL_NAME}...")
+        _ateeqq_processor = AutoImageProcessor.from_pretrained(ATEEQQ_MODEL_NAME)
+        _ateeqq_model = AutoModelForImageClassification.from_pretrained(ATEEQQ_MODEL_NAME)
+        _ateeqq_model.to(_device).eval()
+        # Ateeqq uses strict labels: 0=FAKE (AI), 1=REAL (Human) typically
+        # But we auto-detect to be safe
+        _ateeqq_fake_idx = _detect_fake_index(_ateeqq_model, "Ateeqq")
+        print("[Layer 4.3] Ateeqq loaded")
+    except Exception as e:
+        print(f"[Layer 4.3 Error] Ateeqq Load Failed: {e}")
+        _ateeqq_model = None
+        _ateeqq_processor = None
 
     # --- 4.4: Load ConvNeXt AI Detector ---
     try:
@@ -234,11 +230,11 @@ def _load_models():
     model_count = sum([
         _sdxl_model is not None, 
         _vit_model is not None, 
-        _sig_model is not None,
+        _ateeqq_model is not None,
         _convnext_model is not None,
         _swin_model is not None
     ])
-    print(f"[Layer 4] Ensemble v4.0 ready: {model_count}/5 models loaded")
+    print(f"[Layer 4] Ensemble v5.0 ready: {model_count}/5 models loaded")
     return _device
 
 
@@ -305,6 +301,13 @@ def _run_sdxl_tta(image: Image.Image, device: str) -> Tuple[Optional[float], Opt
         entropy = _calculate_entropy(avg_probs)
         confidence = 1.0 - (entropy / 0.693)  # Normalize by max entropy
         
+        # FIX 2: SDXL Confidence Floor at 0.60 (treat weak signals as neutral)
+        if abs(confidence) < 0.60:
+            print(f"   [4.1 SDXL] P(fake)={prob_fake:.3f} P(real)={prob_real:.3f} "
+                  f"-> score={score:+.1f} (conf={confidence:.2f})")
+            print(f"   [4.1 SDXL] LOW CONFIDENCE ({confidence:.2f} < 0.60) — treating as NEUTRAL, score zeroed")
+            return 0.0, 0.0
+
         print(f"   [4.1 SDXL] P(fake)={prob_fake:.3f} P(real)={prob_real:.3f} "
               f"-> score={score:+.1f} (conf={confidence:.2f})")
         
@@ -414,14 +417,14 @@ def _run_deepfake_tta(image: Image.Image, device: str) -> Tuple[Optional[float],
         return None, None
 
 
-def _run_siglip_tta(image: Image.Image, device: str) -> Tuple[Optional[float], Optional[float]]:
+def _run_ateeqq_tta(image: Image.Image, device: str) -> Tuple[Optional[float], Optional[float]]:
     """
-    Run SigLIP2 with Test-Time Augmentation.
-    SigLIP2 excels at global scene coherence and CLIP-style understanding.
+    Run Ateeqq AI vs Human Detector with Test-Time Augmentation.
+    Specialist for Midjourney v6, SD 3.5, and DALL-E 3.
     
     Returns: (score, confidence) or (None, None) if model unavailable
     """
-    if _sig_model is None or _sig_processor is None:
+    if _ateeqq_model is None or _ateeqq_processor is None:
         return None, None
     
     tta_transforms = _get_tta_transforms()
@@ -430,10 +433,10 @@ def _run_siglip_tta(image: Image.Image, device: str) -> Tuple[Optional[float], O
     try:
         for aug_fn in tta_transforms:
             img_aug = aug_fn(image)
-            inputs = _sig_processor(images=img_aug, return_tensors="pt").to(device)
+            inputs = _ateeqq_processor(images=img_aug, return_tensors="pt").to(device)
             
             with torch.no_grad():
-                outputs = _sig_model(**inputs)
+                outputs = _ateeqq_model(**inputs)
                 probs = torch.nn.functional.softmax(outputs.logits, dim=1)
                 all_probs.append(probs.cpu().numpy()[0])
         
@@ -441,7 +444,7 @@ def _run_siglip_tta(image: Image.Image, device: str) -> Tuple[Optional[float], O
         avg_probs = np.mean(all_probs, axis=0)
         
         # Use auto-detected fake index
-        fake_idx = _sig_fake_idx
+        fake_idx = _ateeqq_fake_idx
         real_idx = 1 - fake_idx
         
         prob_fake = avg_probs[fake_idx]
@@ -454,13 +457,13 @@ def _run_siglip_tta(image: Image.Image, device: str) -> Tuple[Optional[float], O
         entropy = _calculate_entropy(avg_probs)
         confidence = 1.0 - (entropy / 0.693)
         
-        print(f"   [4.3 SigLIP] P(fake)={prob_fake:.3f} P(real)={prob_real:.3f} "
+        print(f"   [4.3 Ateeqq] P(fake)={prob_fake:.3f} P(real)={prob_real:.3f} "
               f"-> score={score:+.1f} (conf={confidence:.2f})")
         
         return score, confidence
         
     except Exception as e:
-        print(f"   [4.3 SigLIP Error] {e}")
+        print(f"   [4.3 Ateeqq Error] {e}")
         return None, None
 
 
@@ -581,13 +584,13 @@ def predict_visuals(file_path: str) -> float:
         # Run ALL 5 Sub-Layers
         s1, c1 = _run_sdxl_tta(image, device)           # SDXL/Diffusion
         s2, c2 = _run_vit_tta(image, device)           # Geometry
-        s3, c3 = _run_siglip_tta(image, device)        # Scene
+        s3, c3 = _run_ateeqq_tta(image, device)        # Midjourney/DALLE Expert
         s4, c4 = _run_convnext_tta(image, device)      # Modern CNN
         s5, c5 = _run_swin_tta(image, device)          # Hierarchical ViT
         
         scores = [s1, s2, s3, s4, s5]
         confs = [c1, c2, c3, c4, c5]
-        model_names = ['SDXL-Detector', 'ViT', 'SigLIP', 'ConvNeXt', 'Swin']
+        model_names = ['SDXL-Detector', 'ViT', 'Ateeqq', 'ConvNeXt', 'Swin']
         
         # Filter out None results
         valid_scores = [(s, c, n) for s, c, n in zip(scores, confs, model_names) if s is not None]
@@ -601,7 +604,7 @@ def predict_visuals(file_path: str) -> float:
         names_only = [v[2] for v in valid_scores]
         
         # 2. ADAPTIVE WEIGHTING
-        current_weights = [W_SDXL, W_VIT, W_SIGLIP, W_CONVNEXT, W_SWIN]
+        current_weights = [W_SDXL, W_VIT, W_ATEEQQ, W_CONVNEXT, W_SWIN]
         if is_low_quality:
             print("   [Layer 4] ! Low Quality detected. Reducing SDXL weight.")
             current_weights = [0.05, 0.25, 0.25, 0.25, 0.20]
@@ -677,7 +680,7 @@ def predict_visuals_detailed(file_path: str, face_count: int = 0) -> Dict:
         # Run base models
         sdxl_score, sdxl_conf = _run_sdxl_tta(image, device)
         vit_score, vit_conf = _run_vit_tta(image, device)
-        sig_score, sig_conf = _run_siglip_tta(image, device)
+        ateeqq_score, ateeqq_conf = _run_ateeqq_tta(image, device)
         convnext_score, convnext_conf = _run_convnext_tta(image, device)
         swin_score, swin_conf = _run_swin_tta(image, device)
         
@@ -714,11 +717,11 @@ def predict_visuals_detailed(file_path: str, face_count: int = 0) -> Dict:
             confidences.append(deepfake_conf)
             weights.append(W_DEEPFAKE)
             model_names.append("deepfake")
-        if sig_score is not None:
-            scores.append(sig_score)
-            confidences.append(sig_conf)
-            weights.append(W_SIGLIP)
-            model_names.append("siglip")
+        if ateeqq_score is not None:
+            scores.append(ateeqq_score)
+            confidences.append(ateeqq_conf)
+            weights.append(W_ATEEQQ)
+            model_names.append("ateeqq")
         if convnext_score is not None:
             scores.append(convnext_score)
             confidences.append(convnext_conf)
@@ -740,20 +743,8 @@ def predict_visuals_detailed(file_path: str, face_count: int = 0) -> Dict:
         # 6-MODEL CONSENSUS LOGIC (v5.0)
         # ================================================================
 
-        # Fix C: Outlier Detection Rule (Cluster-Based)
-        # When one model is > 40 points from the average of others, kill it.
-        if len(scores) >= 3:
-            for idx in range(len(scores)):
-                current_score = scores[idx]
-                others = [scores[j] for j in range(len(scores)) if j != idx]
-                avg_others = sum(others) / len(others)
-                dist = abs(current_score - avg_others)
-                
-                if dist > 40:
-                    print(f"   [Layer 4] ! OUTLIER DETECTED: {model_names[idx]} "
-                          f"({current_score:+.1f}) is {dist:.1f} pts from cluster avg ({avg_others:+.1f}). "
-                          f"Dropping weight to near-zero.")
-                    weights[idx] = 0.001  # Effectively remove from aggregate
+        # Fix 1: Distance-Based Outlier Detection REMOVED
+        # (Outlier logic was deleting high-confidence signals incorrectly)
 
         # 1. Confidence-weighted scoring
         conf_weights = []
@@ -772,7 +763,7 @@ def predict_visuals_detailed(file_path: str, face_count: int = 0) -> Dict:
         overall_conf = sum(c * cw for c, cw in zip(confidences, conf_weights))
         
         # 2. High-confidence override (ONLY specialized models)
-        SPECIALIZED_MODELS = ["vit", "deepfake", "siglip", "convnext", "swin"]
+        SPECIALIZED_MODELS = ["vit", "deepfake", "ateeqq", "convnext", "swin"]
         high_conf_override = False
         for i, c in enumerate(confidences):
             if c > 0.85 and model_names[i] in SPECIALIZED_MODELS:
@@ -798,7 +789,7 @@ def predict_visuals_detailed(file_path: str, face_count: int = 0) -> Dict:
             "sdxl": {"score": sdxl_score, "conf": sdxl_conf} if sdxl_score is not None else None,
             "vit": {"score": vit_score, "conf": vit_conf} if vit_score is not None else None,
             "deepfake_expert": {"score": deepfake_score, "conf": deepfake_conf} if deepfake_score is not None else None,
-            "siglip": {"score": sig_score, "conf": sig_conf} if sig_score is not None else None,
+            "ateeqq": {"score": ateeqq_score, "conf": ateeqq_conf} if ateeqq_score is not None else None,
             "convnext": {"score": convnext_score, "conf": convnext_conf} if convnext_score is not None else None,
             "swin": {"score": swin_score, "conf": swin_conf} if swin_score is not None else None
         }
@@ -883,8 +874,8 @@ def predict_visuals_detailed(file_path: str, face_count: int = 0) -> Dict:
             result["vit"] = {"score": round(vit_score, 2), "confidence": round(vit_conf, 2)}
         if deepfake_score is not None:
             result["deepfake"] = {"score": round(deepfake_score, 2), "confidence": round(deepfake_conf, 2)}
-        if sig_score is not None:
-            result["siglip"] = {"score": round(sig_score, 2), "confidence": round(sig_conf, 2)}
+        if ateeqq_score is not None:
+            result["ateeqq"] = {"score": round(ateeqq_score, 2), "confidence": round(ateeqq_conf, 2)}
         if convnext_score is not None:
             result["convnext"] = {"score": round(convnext_score, 2), "confidence": round(convnext_conf, 2)}
         if swin_score is not None:
@@ -908,7 +899,7 @@ if __name__ == "__main__":
         print("Models:")
         print(f"  • 4.1 SDXL Detector (SDXL/diffusion) - {W_SDXL*100:.0f}%")
         print(f"  • 4.2 ViT Transformer (macro-geometry) - {W_VIT*100:.0f}%")
-        print(f"  • 4.3 SigLIP2 (global coherence) - {W_SIGLIP*100:.0f}%")
+        print(f"  • 4.3 Ateeqq (Midjourney/DALLE Expert) - {W_ATEEQQ*100:.0f}%")
         print(f"  • 4.4 ConvNeXt (modern CNN) - {W_CONVNEXT*100:.0f}%")
         print(f"  • 4.5 Swin Transformer (hierarchical) - {W_SWIN*100:.0f}%")
         print(f"{'='*60}\n")
@@ -931,9 +922,9 @@ if __name__ == "__main__":
         if result.get('vit'):
             print(f"ViT:          score={result['vit']['score']:+.1f}, "
                   f"conf={result['vit']['confidence']:.2f}")
-        if result.get('siglip'):
-            print(f"SigLIP:       score={result['siglip']['score']:+.1f}, "
-                  f"conf={result['siglip']['confidence']:.2f}")
+        if result.get('ateeqq'):
+            print(f"Ateeqq:       score={result['ateeqq']['score']:+.1f}, "
+                  f"conf={result['ateeqq']['confidence']:.2f}")
         if result.get('convnext'):
             print(f"ConvNeXt:     score={result['convnext']['score']:+.1f}, "
                   f"conf={result['convnext']['confidence']:.2f}")
@@ -966,7 +957,7 @@ if __name__ == "__main__":
         print("\n5-Model Ensemble v4.0:")
         print("  • 4.1 SDXL Detector: Stable Diffusion XL specific (newer generators)")
         print("  • 4.2 ViT Transformer: Macro-geometry (semantic inconsistencies)")
-        print("  • 4.3 SigLIP2: Global coherence (CLIP-based scene analysis)")
+        print("  • 4.3 Ateeqq: Midjourney/DALLE Expert (Generative Artifacts)")
         print("  • 4.4 ConvNeXt: Modern CNN for AI artifacts")
         print("  • 4.5 Swin Transformer: Hierarchical multi-scale analysis")
         print("\nFeatures:")
@@ -974,12 +965,12 @@ if __name__ == "__main__":
         print("  • Entropy-based uncertainty scoring")
         print("  • Confidence dampening for uncertain/disagreeing predictions")
         print("  • 5-model consensus for WhatsApp/Google images")
-        print(f"\nWeights: SDXL={W_SDXL:.0%}, ViT={W_VIT:.0%}, SigLIP={W_SIGLIP:.0%}, ConvNeXt={W_CONVNEXT:.0%}, Swin={W_SWIN:.0%}")
+        print(f"\nWeights: SDXL={W_SDXL:.0%}, ViT={W_VIT:.0%}, Ateeqq={W_ATEEQQ:.0%}, ConvNeXt={W_CONVNEXT:.0%}, Swin={W_SWIN:.0%}")
         print("\nRequirements:")
         print("  pip install torch torchvision transformers numpy")
         print("\nModels:")
         print(f"  • SDXL Detector: {SDXL_MODEL_NAME}")
         print(f"  • ViT Transformer: {VIT_MODEL_NAME}")
-        print(f"  • SigLIP2: {SIGLIP_MODEL_NAME}")
+        print(f"  • Ateeqq: {ATEEQQ_MODEL_NAME}")
         print(f"  • ConvNeXt: {CONVNEXT_MODEL_NAME}")
         print(f"  • Swin: {SWIN_MODEL_NAME}")

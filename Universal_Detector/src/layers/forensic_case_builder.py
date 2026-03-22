@@ -6,7 +6,7 @@ Ensures no layer is hidden, grouping them by forensic domain.
 
 import hashlib
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import os
 import json
 
@@ -124,6 +124,123 @@ def identify_contradictions(layer_scores: Dict[str, float], layer_details: Dict[
 
     return contradictions
 
+def determine_reliability(layer_name: str, score: float, detail: str, context_dict: Dict) -> Tuple[str, str]:
+    """
+    Determine the reliability of a forensic signal based on context flags vs score.
+    Returns: (reliability_level, reason)
+    Levels: HIGH, MEDIUM, LOW
+    """
+    reliability = "MEDIUM"
+    reason = "Standard analysis"
+    detail_lower = detail.lower()
+    
+    # Context extraction
+    is_jpeg = context_dict.get("is_jpeg", False)
+    face_count = context_dict.get("face_count", 0)
+    
+    # --- PRNU Rules ---
+    if layer_name == "prnu":
+        # Attempt to parse PCE and Flat Ratio from detail string
+        # Expected format: "PCE: 12345 (interpretation) | Flat: 85.0% ..." or similar
+        import re
+        pce_match = re.search(r'PCE[:=]\s?([\d,]+)', detail)
+        flat_match = re.search(r'Flat[:=]\s?([\d\.]+)%', detail)
+        
+        pce = float(pce_match.group(1).replace(',', '')) if pce_match else 0
+        flat_regions = float(flat_match.group(1)) if flat_match else 0.0
+        
+        # Rule 1: Compression Artifact Range
+        if 10000 <= pce <= 100000 and flat_regions > 60 and is_jpeg:
+            reliability = "LOW"
+            reason = f"PCE={pce:,.0f} in compression artifact range (10K-100K) on image with {flat_regions}% flat regions."
+        
+        # Rule 2: Genuine Synthetic Grid
+        elif pce > 100000 and flat_regions < 60:
+            reliability = "HIGH"
+            reason = f"PCE={pce:,.0f} far exceeds compression range. Genuine synthetic grid."
+            
+        # Rule 3: Intermediate
+        elif 3000 <= pce <= 10000:
+            reliability = "MEDIUM"
+            reason = f"PCE={pce:,.0f} in intermediate range."
+            
+        # Rule 4: Camera Original Low PCE
+        elif "camera original" in detail_lower and pce < 3000:
+             reliability = "HIGH"
+             reason = "Genuine camera original with expected low PCE."
+             
+    # --- Watermark Rules ---
+    elif layer_name == "watermark":
+        if "visible" in detail_lower and ("text" in detail_lower or "logo" in detail_lower):
+            reliability = "LOW"
+            reason = "Brand mark or text likely triggered false positive."
+        elif "synthid" in detail_lower and score <= -40:
+            reliability = "HIGH"
+            reason = "Strong SynthID detection."
+        elif is_jpeg and score > -30:
+            reliability = "LOW"
+            reason = "Signal potentially dampened by JPEG compression."
+        elif "multiple" in detail_lower and "confirmed" in detail_lower:
+            reliability = "HIGH"
+            reason = "Multiple watermark types confirmed."
+
+    # --- Shadow Rules ---
+    elif layer_name == "shadow":
+        phys_cont = context_dict.get("physical_continuity_detail", "").lower()
+        if face_count == 0 and ("ambient" in phys_cont or "spread" in phys_cont):
+            reliability = "LOW"
+            reason = "Indoor multi-source lighting on faceless image is ambiguous."
+        elif "outdoor" in detail_lower and "dominant" in detail_lower:
+            reliability = "HIGH"
+            reason = "Outdoor scene with clear dominant shadow direction."
+        elif "indoor" in detail_lower:
+            reliability = "MEDIUM"
+            reason = "Indoor lighting analysis."
+
+    # --- Spectrum Rules ---
+    elif layer_name == "spectrum":
+        if is_jpeg and "suspicious" in detail_lower:
+             reliability = "LOW"
+             reason = "MozJPEG artifact, not AI manipulation."
+        elif ("spike" in detail_lower and "1000" in detail_lower) and ("text" in detail_lower or "logo" in detail_lower):
+             reliability = "LOW"
+             reason = "High frequency text patterns mimicking AI spikes."
+        elif not is_jpeg and "suspicious" in detail_lower:
+             reliability = "HIGH"
+             reason = "Suspicious patches in non-JPEG image."
+             
+    # --- Visual Rules (Including Ateeqq) ---
+    elif layer_name == "visual" or layer_name == "ensemble":
+        # Check breakdown if available in context
+        breakdown = context_dict.get("model_breakdown", {})
+        sdxl_data = breakdown.get("sdxl", {})
+        ateeqq_data = breakdown.get("ateeqq", {}) # NEW: Ateeqq instead of SigLIP
+
+        # SDXL Reliability
+        if sdxl_data:
+            conf = sdxl_data.get("conf", 0)
+            if conf is None: conf = 0
+            
+            if conf < 0.60:
+                reliability = "LOW"
+                reason = f"SDXL confidence {conf:.2f} below 0.60 floor (treating as noise)."
+            elif conf > 0.80:
+                reliability = "HIGH"
+                reason = f"SDXL confidence {conf:.2f} in specialist authority range."
+            else:
+                reliability = "MEDIUM"
+                reason = f"SDXL confidence {conf:.2f} in intermediate range."
+
+        # Ateeqq Reliability
+        if ateeqq_data:
+             conf = ateeqq_data.get("conf", 0)
+             if conf is None: conf = 0
+             if conf > 0.85:
+                 reliability = "HIGH"
+                 reason += f" | Ateeqq (Generative Expert) high confidence {conf:.2f}"
+
+    return reliability, reason
+
 def compile_case_file(
     image_path: str,
     layer_scores: Dict[str, float],
@@ -140,13 +257,22 @@ def compile_case_file(
     model_ai_votes: int = 0,
     warnings: Optional[list] = None,
     effective_scores: Optional[Dict[str, float]] = None,
-    model_breakdown: Optional[Dict[str, Any]] = None  # Added
+    model_breakdown: Optional[Dict[str, Any]] = None,
+    face_count: int = 0  # NEW: Need face count for reliability rules
 ) -> Dict[str, Any]:
     
     case_id = generate_case_id(image_path)
     if not image_description:
         image_description = extract_image_context(image_path, layer_details)
     
+    # Context dictionary for reliability checker
+    context_dict = {
+        "is_jpeg": is_jpeg,
+        "face_count": face_count,
+        "physical_continuity_detail": layer_details.get("physical_continuity", ""),
+        "model_breakdown": model_breakdown or {}
+    }
+
     # 1. Build Categorized Evidence
     evidence_by_category = {cat: [] for cat in LAYER_CATEGORIES.keys()}
     evidence_by_category["Other / Unclassified"] = []
@@ -156,6 +282,10 @@ def compile_case_file(
     
     for layer_name, score in layer_scores.items():
         eff_score = effective_scores.get(layer_name, score) if effective_scores else score
+        detail = layer_details.get(layer_name, "No detail provided")
+        
+        # NEW: Determine Reliability
+        reliability, rel_reason = determine_reliability(layer_name, score, detail, context_dict)
         
         item = {
             "layer": layer_name,
@@ -163,7 +293,9 @@ def compile_case_file(
             "effective_score": eff_score,
             "score": eff_score, # Backward compatibility for formatters
             "strength": classify_evidence_strength(eff_score), # Use EFFECTIVE strength here
-            "detail": layer_details.get(layer_name, "No detail provided")
+            "detail": detail,
+            "reliability": reliability,      # NEW FIELD
+            "reliability_reason": rel_reason # NEW FIELD
         }
         
         # Add suppression flag if difference is significant
@@ -201,7 +333,8 @@ def compile_case_file(
         "image_info": {
             "filename": os.path.basename(image_path),
             "context": image_description,
-            "is_compressed": is_jpeg
+            "is_compressed": is_jpeg,
+            "face_count": face_count
         },
         # CRITICAL: Expose raw scores at root so LLM Judge can find them easily
         "layer_scores": layer_scores,
@@ -226,6 +359,7 @@ def compile_case_file(
         },
         "warnings": warnings or []
     }
+
 
 def case_file_to_prompt_string(case_file: Dict[str, Any]) -> str:
     """
@@ -278,7 +412,23 @@ def case_file_to_prompt_string(case_file: Dict[str, Any]) -> str:
                 suppressed_marker = "[SUPPRESSED]"
             
             icon = "✅" if eff_val > 25 else ("❌" if eff_val < -25 else "⚫")
-            lines.append(f"  {icon} {suppressed_marker} [{item['layer'].ljust(15)}] Score: {score_display} | {item['detail']}")
+            
+            # RELIABILITY DISPLAY FIX
+            reliability = item.get('reliability', 'MEDIUM')
+            rel_reason = item.get('reliability_reason', '')
+            
+            rel_tag = ""
+            if reliability != "MEDIUM":
+                rel_tag = f" | RELIABILITY: {reliability}"
+                
+            line_detail = item['detail']
+            
+            # Format main line
+            lines.append(f"  {icon} {suppressed_marker} [{item['layer'].ljust(15)}] Score: {score_display}{rel_tag} | {line_detail}")
+            
+            # Sub-line for reliability reason if not standard/medium
+            if reliability != "MEDIUM" and rel_reason:
+                lines.append(f"     Reason: {rel_reason}")
 
     # 3. Neural Consensus
     lines.append(f"\n===  VISUAL CONSENSUS ===")
