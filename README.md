@@ -1,215 +1,214 @@
-# DeepFake Detection System
+# Multi-Layer DeepFake Detection System
 
-A multi-layered AI-powered deepfake detection system using various analysis techniques including metadata analysis, digital physics, facial consistency, visual AI, frequency spectrum analysis, and optical physics (eye reflection analysis).
+A high-precision, enterprise-grade forensic engine designed to detect AI-generated and manipulated imagery. This system employs a "Defense in Depth" strategy, stacking 15+ analysis layers ranging from cryptographic verification and digital physics to neural ensembles and adversarial LLM debates.
 
-## Features
+![System Status](https://img.shields.io/badge/Status-Active-success)
+![Python Version](https://img.shields.io/badge/Python-3.8%2B-blue)
+![API Type](https://img.shields.io/badge/API-FastAPI-009688)
 
-- **Layer 0: C2PA** - Verifies cryptographic content credentials
-- **Layer 1: Triage** - Quick file validation
-- **Layer 2: Metadata** - Detects AI generation tools and missing EXIF data
-- **Layer 3: Physics** - ELA (Error Level Analysis) and noise consistency
-- **Layer 3.5: Face** - Analyzes facial landmark and background consistency
-- **Layer 4: Visual** - 5-Model Neural Ensemble (SDXL-Detector + ViT + SigLIP2 + ConvNeXt + Swin)
-- **Layer 6: Spectrum** - Frequency domain analysis (FFT)
-- **Layer 7: Eyes** - Optical physics and corneal reflection consistency
-- **Layer 8: Watermark** - Detects invisible watermarks and text
-- **Layer 8.5: PRNU** - Sensor fingerprint analysis
-- **Layer 9: Context** - Reverse image search for provenance
-- **Layer 10: Shadow** - Light source consistency analysis
-- **Layer 12: Artifacts** - Spatial domain analysis for checkerboard/GAN traces
-- **Layer 5: The Judge** - Master verdict system with "Redemption Logic"
-- **Final Boss: LLM** - Single Gemini/OpenRouter call for gray zone cases
-- **Final Boss: Adversarial Debate** - Prosecution vs Defense vs Convergence Judge for contradictions
+## 🚀 Key Features
 
-## Installation
+The system uses a consensus mechanism where multiple independent forensic layers vote on the image's authenticity.
 
-1. Clone the repository and move into it:
+### 🛡️ Layer 0: Cryptographic Truth
+- **C2PA/Content Credentials**: Verifies digital signatures and provenance chains (Adobe, Microsoft, etc.).
+- **Immediate Trust**: If valid C2PA credentials from a trusted issuer are found, the system can short-circuit to a "verified" verdict.
+
+### 🔍 Low-Level Forensics (Digital Physics)
+- **Layer 1: Triage**: Rapid file header analysis to detect obvious mismatches and broken files.
+- **Layer 2: Metadata**: Scans EXIF/XMP for traces of AI tools (e.g., "Diffusers", "Midjourney") and missing camera data.
+- **Layer 3: ELA & Noise**: Error Level Analysis (ELA) and noise print analysis to detect spliced areas or inconsistent compression.
+- **Layer 6: Frequency Spectrum**: FFT (Fast Fourier Transform) analysis to detect grid-like artifacts common in GANs and early Diffusion models.
+- **Layer 8: Watermarks**: Detects invisible signatures (Digimarc, SynthID traces) and visible AI tool watermarks.
+- **Layer 8.5: PRNU**: Photo Response Non-Uniformity analysis to match images to specific camera sensor fingerprints.
+
+### 🧠 Semantic & Physics Analysis
+- **Layer 3.5: Face Consistency**: Compares foreground faces against the background for lighting and resolution mismatches.
+- **Layer 7: Eye Physics**: Analyzes corneal reflections (gaze direction, light source consistency across both eyes).
+- **Layer 10: Shadow Convergence**: Checks if shadows cast by objects converge to a single, consistent light source.
+- **Layer 11: Physical Continuity**: Checks for vanishing point consistency and geometric logic.
+
+### 🤖 Neural Detection Ensemble (Layer 4)
+A voting block of 5 specialized computer vision models:
+1. **SDXL-Detector**: Specialized for Stable Diffusion XL artifacts.
+2. **ViT (Vision Transformer)**: General purpose anomaly detection.
+3. **SigLIP 2**: Multimodal embedding analysis.
+4. **ConvNeXt**: High-fidelity feature extraction.
+5. **Swin Transformer**: Hierarchical visual processing.
+
+### ⚖️ The "Final Boss" (Layers 5 & 12)
+- **Layer 5: Standard Judge**: A weighted algorithm that aggregates all layer scores into a final probability 0-100.
+- **LLM Judge**: For "Gray Zone" cases (score 35-65), a Vision LLM (Gemini/GPT-4o) acts as a human expert, reviewing the visual evidence and forensic logs.
+- **Adversarial Debate**: In highly ambiguous cases, the system spawns two AI agents—a "**Prosecutor**" and a "**Defense Attorney**"—who argue over the evidence. A third "**Judge**" AI delivers the final verdict based on their debate.
+
+---
+
+## 📦 Installation
+
+### Prerequisites
+- Python 3.8+
+- Git
+- (Optional) Docker for containerized deployment
+
+### 1. Clone & Setup
 ```bash
 git clone <your-repo-url>
 cd DeepFake_Detection
 ```
 
-2. Create a virtual environment:
-
-Windows (PowerShell):
+### 2. Virtual Environment
+**Windows (PowerShell):**
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-macOS/Linux:
+**macOS/Linux:**
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-3. Install dependencies from the root requirements file:
+### 3. Install Dependencies
 ```bash
+# Core dependencies
 pip install -r requirements.txt
 ```
 
-4. Configure environment variables:
+### 4. Environment Configuration
+Create a `.env` file in the root directory:
 ```bash
 cp .env.example .env
 ```
 
-On Windows, if `cp` is not available:
-```powershell
-Copy-Item .env.example .env
+**Required Keys for Full Functionality:**
+```ini
+# At least one LLM provider is needed for the "Final Boss" layers
+GOOGLE_AI_API_KEY=your_gemini_key
+# OR
+OPENROUTER_API_KEY=your_openrouter_key
+# OR
+GROQ_API_KEY=your_groq_key
+
+# System Flags
+ENABLE_LLM_JUDGE=true
 ```
 
-Edit `.env` and set at least one LLM provider key:
-- `GOOGLE_AI_API_KEY` (or `GEMINI_API_KEY`)
-- `GROQ_API_KEY`
-- `OPENROUTER_API_KEY`
+---
 
-Keep `ENABLE_LLM_JUDGE=true` to allow LLM-based judging.
+## 🏃 Usage
 
-## Usage
-
-Run the FastAPI server from the repository root:
+### Start API Server
 ```bash
-python -m uvicorn main:app --reload
+python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+- **Docs**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Health**: [http://localhost:8000/health](http://localhost:8000/health)
+
+### API Endpoints
+
+#### 1. Analyze Local File
+`POST /analyze`
+Uploads an image file for immediate analysis.
+```bash
+curl -X POST "http://localhost:8000/analyze" -F "file=@/path/to/image.jpg"
 ```
 
-Then open:
-- API docs: `http://127.0.0.1:8000/docs`
-- Health endpoint: `http://127.0.0.1:8000/health`
-
-Example API call (PowerShell):
-```powershell
-Invoke-RestMethod -Uri http://127.0.0.1:8000/analyze -Method Post -Form @{
-    file = Get-Item "path\to\image.jpg"
+#### 2. Analyze URL
+`POST /analyze-url`
+Downloads and analyzes an image from a public URL (supports s3, http, https).
+```json
+{
+  "s3_url": "https://example.com/image.jpg"
 }
 ```
 
-Example API call (curl):
+### Response Format
+The API returns a detailed JSON report:
+```json
+{
+  "final_score": 95,
+  "verdict": "AI-GENERATED",
+  "confidence": "HIGH",
+  "technical_description": "...",
+  "user_description": "...",
+  "layer_scores": {
+    "c2pa": 0,
+    "metadata": 45,
+    "physics": 20,
+    "neural_network": 98,
+    "...": "..."
+  },
+  "judge_source": "debate" // rule-based, llm, or debate
+}
+```
+
+---
+
+## 🐳 Docker Deployment
+
+Run the system in a self-contained environment.
+
 ```bash
-curl -X POST "http://127.0.0.1:8000/analyze" -F "file=@path/to/image.jpg"
+# 1. Build Image
+docker build -t deepfake-detector .
+
+# 2. Run Container (Map port 8000)
+docker run -d -p 8000:8000 --env-file .env --name detector deepfake-detector
 ```
+*Note: The first startup may take a few minutes to download the neural model weights.*
 
-## Docker
+---
 
-You can run this API in Docker without installing Python locally.
+## 🧪 Validation & Testing
 
-1. Create `.env` from template and set your API keys:
-```bash
-cp .env.example .env
-```
+To test the system against a labeled dataset (Real vs Fake):
 
-2. Build image:
-```bash
-docker build -t deepfake-detection:latest .
-```
+1. **Prepare Data**:
+   Place images in `validation_dataset/real/` and `validation_dataset/fake/`.
 
-3. Run container:
-```bash
-docker run --rm -p 8000:8000 --env-file .env --name deepfake-api deepfake-detection:latest
-```
+2. **Run Validation Script**:
+   ```bash
+   python validate.py
+   ```
+   This will run the full pipeline on all images and generate a statistical report (`VALIDATION_REPORT.md`), including Accuracy, Precision, Recall, and F1-Score.
 
-4. Open:
-- API docs: `http://127.0.0.1:8000/docs`
-- Health endpoint: `http://127.0.0.1:8000/health`
+---
 
-Docker Compose alternative:
-```bash
-docker compose up --build
-```
-
-Stop Compose:
-```bash
-docker compose down
-```
-
-Notes:
-- First run can be slow because Python ML/CV dependencies are heavy.
-- LLM features require valid keys in `.env`.
-- If port `8000` is busy, map another host port (for example `-p 8001:8000`).
-
-Optional: configure AI metadata keywords (comma-separated) used by Layer 2:
-
-Windows (PowerShell):
-```powershell
-$env:AI_METADATA_KEYWORDS="midjourney,stable diffusion,openai,firefly"
-```
-
-Windows (cmd):
-```bash
-set AI_METADATA_KEYWORDS=midjourney,stable diffusion,openai,firefly
-```
-
-macOS/Linux:
-```bash
-export AI_METADATA_KEYWORDS="midjourney,stable diffusion,openai,firefly"
-```
-
-## LLM Notes
-
-- LLM is not called for every image.
-- The system uses LLM mainly for ambiguous or contradictory cases.
-- If no valid key is available, the app falls back to rule-based judging.
-
-## API Endpoint
-
-**POST** `/analyze`
-- Upload an image file
-- Returns detection results with confidence score and detailed analysis
-
-## Project Structure
+## 📂 Project Structure
 
 ```
 DeepFake_Detection/
-├── main.py                          # FastAPI application entry point
-├── requirements.txt                 # Python dependencies (install from this file)
-├── .env.example                     # Environment variable template
-├── temp_uploads/                    # Temporary upload directory
-└── Universal_Detector/
-    └── src/
-        └── layers/
-            ├── layer_2_metadata.py      # Metadata analysis
-            ├── layer_3_physics.py       # Digital physics
-            ├── layer_3_5_face.py        # Face consistency
-            ├── layer_4_visual.py        # Visual AI model
-            ├── layer_5_judge.py         # Final verdict aggregator
-            ├── layer_6_spectrum.py      # Frequency analysis
-            ├── layer_7_eyes.py          # Eye reflection analysis
-            ├── debate/                   # Adversarial debate package
-            │   ├── __init__.py          # Re-exports DebateOrchestrator
-            │   ├── models.py            # Shared data classes & prompts
-            │   ├── prosecution.py       # Prosecution agent (Gemini Vision)
-            │   ├── defense.py           # Defense agent (OpenRouter Vision)
-            │   ├── convergence.py       # Convergence judge (Groq text)
-            │   └── orchestrator.py      # Debate flow controller
-            └── (models auto-downloaded from HuggingFace)
+├── main.py                        # API Entry Point & Orchestrator
+├── validate.py                    # Validation/Testing Suite
+├── train_custom_model.py          # (Experimental) Custom Model Training
+├── requirements.txt               # Dependency Locking
+├── Universal_Detector/
+│   └── src/
+│       ├── layers/                # ALL Forensic Logic
+│       │   ├── layer_0_c2pa.py    # Content Credentials
+│       │   ├── layer_1_triage.py  # Validation
+│       │   ├── layer_2_metadata.py
+│       │   ├── layer_3_physics.py # Noise/ELA
+│       │   ├── layer_4_visual.py  # Neural Ensemble
+│       │   ├── layer_5_judge.py   # Rule-Based Verdicts
+│       │   ├── layer_6_spectrum.py
+│       │   ├── layer_7_eyes.py
+│       │   ├── layer_10_Shadow_Convergence.py
+│       │   ├── layer_12_artifacts.py
+│       │   ├── forensic_case_builder.py
+│       │   ├── llm_judge.py       # "Final Boss" Logic
+│       │   └── debate/            # Adversarial Agents
+│       └── utils/
+└── temp_uploads/                  # Ephemeral storage for processing
 ```
 
-## Requirements
+## 🛠️ Troubleshooting
 
-- Python 3.8+
-- FastAPI
-- PyTorch
-- OpenCV
-- MediaPipe
-- Pillow
-- NumPy
+- **"OpenRouter API Key MISSING"**: The debate feature will be disabled. Set `OPENROUTER_API_KEY` in `.env`.
+- **High Latency**: The first run downloads heavy model weights (~2GB). Subsequent runs are faster.
+- **GPU Usage**: The system defaults to CPU. To use CUDA, ensure `torch` is installed with CUDA support.
 
-## Troubleshooting
+## 📄 License
+MIT License - Open for research and educational use.
 
-1. `LLM not working`
-- Ensure `.env` exists in the project root.
-- Ensure at least one API key is set and valid.
-- Ensure `ENABLE_LLM_JUDGE=true`.
-- Check terminal logs for provider errors like missing key, quota, or auth failures.
-
-2. `Module/import errors`
-- Confirm you installed from `requirements.txt` in the repository root.
-- Confirm your virtual environment is activated before running `uvicorn`.
-
-3. `Port already in use`
-```bash
-python -m uvicorn main:app --reload --port 8001
-```
-
-## License
-
-MIT
