@@ -10,6 +10,24 @@ Combines SIX specialized deep learning models for robust detection:
   4.5 ConvNeXt         → Modern CNN
   4.6 Swin Transformer → Hierarchical vision transformer
 
+WHY 5 MODELS?
+- Works on WhatsApp/Google compressed images (content-level analysis)
+- If 4/5 models agree on REAL → strong consensus even without PRNU
+- Each model sees different AI artifacts
+
+CHANGES (v4.0):
+- Replaced EfficientNet-B0 (trained on older GAN data) with Organika/sdxl-detector
+  which specifically targets Stable Diffusion XL outputs and newer generators
+- Removed dependency on local efficientnet_b0.pth weights file
+- Removed efficientnet-pytorch dependency
+
+IMPROVEMENTS:
+- Test-Time Augmentation (TTA) for robustness
+- Entropy-based uncertainty scoring
+- Confidence dampening when models disagree
+- 5-model consensus with weighted voting
+- Auto-detect fake/real label indices
+- Model consensus for compressed images (no hardware evidence)
 """
 
 import torch

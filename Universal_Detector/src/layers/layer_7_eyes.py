@@ -233,6 +233,15 @@ def _score_morphology(glints: List[Dict]) -> Tuple[float, str]:
 def _compare_eyes(left_glints: List[Dict], right_glints: List[Dict]) -> Tuple[float, str]:
     """
     Compare specular highlights between left and right eye.
+
+    Checks:
+      A) Count match — same light sources → same number of glints
+      B) Relative position match — glint at (0.3, 0.4) in left eye should
+         appear at roughly (0.7, 0.4) in right eye (mirror symmetry)
+      C) Intensity ratio — both glints should have similar brightness
+      D) Morphology similarity — both glints should have similar circularity
+
+    Returns (score_delta, description).
     """
     n_left = len(left_glints)
     n_right = len(right_glints)
@@ -355,6 +364,9 @@ def _score_edge_sharpness(eye_crop_bgr: np.ndarray, glints: List[Dict]) -> Tuple
     Real specular highlights have sharp intensity falloff (point-source
     reflection off a curved cornea).  AI-generated highlights often have
     soft/gradient edges because diffusion models blur high-frequency details.
+
+    Method: For each glint, measure the gradient magnitude at its boundary.
+    High gradient = sharp edge = real.  Low gradient = soft = suspicious.
     """
     if not glints:
         return 0, ""
@@ -429,7 +441,19 @@ def _cross_face_consistency(all_face_data: List[Dict]) -> Tuple[float, str]:
 # ============================================================================
 
 def analyze_eyes(image_path: str) -> Tuple[float, str]:
+    """
+    Layer 7 v2.0: Corneal Reflection Forensics.
 
+    Pipeline:
+      1. Detect face(s) with MediaPipe FaceMesh (refined iris landmarks)
+      2. For each face: extract eye crops → detect glints → score morphology
+      3. Cross-eye consistency (same face)
+      4. Cross-face consistency (multi-face scenes)
+      5. Edge sharpness analysis
+
+    Returns: (score, description)
+      score: -50 to +30
+    """
     try:
         import mediapipe as mp
         mp_face_mesh = mp.solutions.face_mesh
