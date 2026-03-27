@@ -77,10 +77,9 @@ RUN apt-get update \
         libsm6 \
         libxext6 \
         libxrender1 \
-        libpng6 \
+        libpng16 \
         libjpeg62-turbo \
         libwebp7 \
-        libprotobuf32 \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
