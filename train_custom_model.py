@@ -1,11 +1,15 @@
 """
 Custom AI Image Detector Training Script
 =========================================
-This script i developed to train a custom Ai image detector using PyTorch and the timm library. 
-It supports training on a dataset of real vs AI-generated images, with configurable model 
-architectures and training settings.
-But not used because the custom model is not performing well, and the layer 5 judge is already 
-very good at detecting AI images, so I decided to focus on improving the layer 5 judge instead of training a custom model.
+Fine-tune EfficientNet-B0 on your own AI vs Real dataset.
+
+Usage:
+    1. Organize images in datasets/train/{real,ai}/ and datasets/val/{real,ai}/
+    2. Run: python train_custom_model.py
+    3. Model saved to: Universal_Detector/src/layers/custom_detector.pth
+
+Requirements:
+    pip install torch torchvision timm pillow tqdm tensorboard
 """
 
 import os

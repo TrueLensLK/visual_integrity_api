@@ -328,6 +328,13 @@ class MultiShadowAnalyzer:
     - All shadows must originate from the same light source(s)
     - Shadow length ratios should match object height ratios
     - AI often creates shadows pointing in different directions
+    
+    Method:
+    1. Detect objects (using contours or simple blob detection)
+    2. For each object, detect its shadow region
+    3. Estimate shadow direction vector for each object
+    4. Compare vectors - they should be parallel (single light) or
+       show consistent multiple-source pattern
     """
     
     def __init__(self):

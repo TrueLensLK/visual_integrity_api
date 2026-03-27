@@ -320,7 +320,7 @@ def compile_case_file(
     # We can infer Swin's influence if we see high disagreement and specific conditions
     if model_ai_votes >= 3 and neural_score > 0:
          neural_outlier_warning = (
-            f"CRITICAL: The aggregate neural_network score ({neural_score:+.1f}) may be INVALID. "
+            f"⚠️ CRITICAL: The aggregate neural_network score ({neural_score:+.1f}) may be INVALID. "
             f"3/{model_ai_votes + model_real_votes} models say FAKE, yet the total score is POSITIVE. "
             f"This suggests a face-swap model (Swin) defaulted to REAL on a faceless image. "
             f"TRUST THE VOTE COUNT (3+ votes FAKE), NOT THE AGGREGATE SCORE."
